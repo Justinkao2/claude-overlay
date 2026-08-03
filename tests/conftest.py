@@ -139,6 +139,9 @@ def _clean_overlay(ov):
                                         # worker's reset_done, which the fixture never delivers
     ov._capture_busy = False
     ov._paste_busy = False
+    ov._auth_dead = False               # credential-watchdog state: a gate test must not leak
+    ov._auth_told = False               # a "login is dead" verdict into the next test
+    ov._auth_checked = 0.0
     ov._send_hover = False
     ov._thinking_active = False
     try:

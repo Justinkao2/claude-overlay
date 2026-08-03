@@ -67,6 +67,7 @@ except Exception:  # pragma: no cover
 from config import *
 from debuglog import dbg, DEBUG_LOG, _UIQueueTap, _dbg_stream_last, _dbg_think_last
 from modelresolve import resolve_model
+import authstate
 
 class ClaudeWorker(threading.Thread):
     def __init__(self, ui_queue: "queue.Queue", permission_mode=None):
@@ -120,6 +121,20 @@ class ClaudeWorker(threading.Thread):
         # (see the droppable list). Recorded so _open can tell "connected WITH --resume"
         # from "connected fresh because this SDK has no --resume".
         self._last_dropped = []
+        # Fingerprint of the CLI's credential file as it was when this client connected.
+        # The CLI caches the tokens it read at startup, so a refresh (or a re-login) by ANY
+        # process leaves our long-lived subprocess holding a superseded copy — and a copy it
+        # already failed to refresh is marked dead FOR THAT PROCESS ONLY. Both are fixed by
+        # starting a fresh subprocess, so a changed fingerprint recycles the client before
+        # the next turn (with --resume, so the conversation survives). See authstate.py.
+        self._creds_sig = None
+        # An auth failure was reported by the CLI on the last turn. Gives _auth_recycle one
+        # attempt to clear a login that is dead only inside our subprocess; cleared again by
+        # the first turn that ends without an auth error.
+        self._auth_error_seen = False
+        # Whether that one recycle attempt has already been spent for the current failure,
+        # so a genuinely dead login can't put us in a reconnect loop.
+        self._auth_recycled = False
 
     def ask(self, text: str, image_paths=None):
         self.req.put(("ask", (text, list(image_paths or []))))
@@ -424,14 +439,18 @@ class ClaudeWorker(threading.Thread):
                 await self._reconnect()
         await self._close()
 
-    async def _reconnect(self):
+    async def _reconnect(self, note=None):
         """Tear down a broken client and stand up a working one so the next turn works.
         When the session id is known, reconnect WITH it (--resume) so the conversation
         survives the transport dying — historically this path silently cost the user
         their whole context. Only a failed resume falls back to a fresh session (and
-        _open announces that fallback)."""
+        _open announces that fallback).
+
+        `note` replaces the default "connection hiccup" line: a credential-driven recycle
+        is not a transport failure, and saying so would misattribute the cause."""
         sid = self._session_id
         self.ui.put(("system",
+                     note if note else
                      "↻ Connection hiccup — reconnecting and resuming the conversation…"
                      if sid else
                      "↻ Connection hiccup — reconnected with a fresh session."))
@@ -543,6 +562,10 @@ class ClaudeWorker(threading.Thread):
                 await asyncio.wait_for(self._lifecycle_task, CONNECT_TIMEOUT)
             finally:
                 self._lifecycle_task = None
+            # Pin the credential fingerprint to THIS subprocess's view of the tokens. Taken
+            # after the connect so a refresh the CLI performs during startup is already
+            # included — otherwise every first turn would look like "credentials changed".
+            self._creds_sig = authstate.signature()
             self.ui.put(("ready", None))
             # Context usage is informative only; do not block the first queued prompt on
             # an extra CLI round-trip during startup/reconnect.
@@ -566,6 +589,14 @@ class ClaudeWorker(threading.Thread):
                 self.ui.put(("error",
                     f"Your claude-agent-sdk looks too old ({type(e).__name__}: {e}). "
                     "Update it:  pip install --upgrade claude-agent-sdk  (or run update.cmd)."))
+            elif authstate.is_auth_error_text(e):
+                # The CLI itself refused on authentication — the generic "is it installed?"
+                # advice below would send the user looking in the wrong place entirely.
+                self._auth_error_seen = True
+                self.ui.put(("error",
+                    f"Claude CLI can't authenticate: {e}\nSign in again in a terminal:  "
+                    "claude auth login   (then send your message again — the overlay picks "
+                    "the new login up on its own)."))
             else:
                 self.ui.put(("error",
                     f"Could not start Claude: {type(e).__name__}: {e}\n"
@@ -640,6 +671,37 @@ class ClaudeWorker(threading.Thread):
             finally:
                 self._lifecycle_task = None
 
+    async def _auth_recycle(self):
+        """Recycle the CLI subprocess when its cached login can no longer be trusted, so the
+        next turn runs against the CURRENT tokens instead of a superseded copy.
+
+        Two triggers, both cheap (one stat()):
+          * the credential file changed since we connected — ANY process's token refresh, or
+            the user re-logging in from a terminal, rewrites it, and a CLI we have held open
+            since before that may still be using what it read at startup;
+          * the previous turn failed with an auth error — that login is dead inside THIS
+            subprocess (the CLI marks a failed refresh token dead in an in-memory set) but a
+            fresh subprocess starts without that set. Tried at most ONCE per failure, so a
+            login that is dead everywhere (blanked on disk) can't become a reconnect loop —
+            that case is what the UI's auth gate reports instead.
+        Both reconnects carry --resume, so the conversation survives either way."""
+        sig = authstate.signature()
+        rotated = (sig is not None and self._creds_sig is not None and sig != self._creds_sig)
+        if rotated:
+            self._creds_sig = sig
+        if self._client is None:
+            return          # nothing to recycle — _run_turn opens a fresh client right below
+        if rotated:
+            dbg("auth_recycle", "credential file changed since connect")
+            await self._reconnect(note="↻ The Claude CLI login was refreshed elsewhere — "
+                                       "reconnecting so this session uses the current one "
+                                       "(your conversation is kept).")
+        elif self._auth_error_seen and not self._auth_recycled:
+            self._auth_recycled = True
+            dbg("auth_recycle", "retrying once after an auth error")
+            await self._reconnect(note="↻ Restarting the Claude CLI session to clear a stale "
+                                       "login (your conversation is kept).")
+
     async def _run_turn(self, payload):
         text, image_paths = payload if isinstance(payload, tuple) else (payload, [])
         dbg("turn_start", f"imgs={len(image_paths or [])} | {str(text)[:120]}")
@@ -665,6 +727,13 @@ class ClaudeWorker(threading.Thread):
                                     "stop_reason": None, "cost": None}))
             self.ui.put(("turn_done", None))
             return
+        # Before spending the turn, make sure the subprocess isn't running on a login that
+        # has been superseded or already rejected (see _auth_recycle). Guarded: a failure in
+        # here must never cost the user their message.
+        try:
+            await self._auth_recycle()
+        except Exception as e:
+            dbg("auth_recycle", f"skipped: {type(e).__name__}: {e}")
         if self._client is None:        # initial connect failed earlier — try once more
             await self._open()
         if self._client is None:
@@ -965,6 +1034,15 @@ class ClaudeWorker(threading.Thread):
                          # occurrence is diagnosable from the activity log
                 dbg("result_error", "subtype=%s stop=%s detail=%s"
                     % (subtype, stop_reason, str(detail)[:300]))
+            # Remember whether the CLI reported an AUTH failure: the next turn's
+            # _auth_recycle gets one attempt to clear a login that is dead only inside this
+            # subprocess. Only error payloads are inspected — matching reply text would
+            # misfire on any answer that happens to discuss OAuth.
+            if is_err and authstate.is_auth_error_text(detail):
+                self._auth_error_seen = True
+            elif not is_err:
+                self._auth_error_seen = False    # a clean turn re-arms the one-shot recycle
+                self._auth_recycled = False
             self.ui.put(("result", {"cost": getattr(msg, "total_cost_usd", None),
                                     "is_error": is_err, "subtype": subtype,
                                     "result": detail, "stop_reason": stop_reason}))

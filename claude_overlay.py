@@ -36,6 +36,7 @@ from debuglog import dbg, DEBUG_LOG
 from win32utils import *
 from win32utils import _user32, _gdi32
 from worker import ClaudeWorker
+import authstate
 
 # ───────────────────────────── the overlay UI ─────────────────────────────
 PLACEHOLDER = "Reply to Claude…"
@@ -193,6 +194,14 @@ class Overlay:
                                           # working in before focusing the overlay; the "window"
                                           # capture scope targets it whenever the overlay has focus
         self._fg_checked = 0.0            # throttle that tracking to ~0.5s in _poll
+        # The `claude` CLI's login can die in a way NOTHING here can repair: a refresh
+        # rejected with invalid_grant makes the CLI blank its own stored credentials, after
+        # which every message fails until the user signs in again (see authstate.py). These
+        # track that state so it's announced once — not per message — and so a send isn't
+        # allowed to consume a typed prompt and its attachments into a turn that cannot work.
+        self._auth_dead = False           # last known "stored login is provably unusable"
+        self._auth_checked = 0.0          # throttle the credential watchdog in _poll
+        self._auth_told = False           # the notice has been shown for the CURRENT death
         # Per-overlay custom name (session-only, set by clicking the titlebar "Claude"). Shown
         # in the titlebar + window title when expanded, and as a small pill UNDER the orb when
         # collapsed — so several overlays open at once (one per task) are tellable apart at a
@@ -2812,6 +2821,14 @@ class Overlay:
         if not reason:
             sr = payload.get("stop_reason")
             reason = f"stop reason: {sr}" if sr else "no detail reported by the CLI"
+        # "Your next message is unaffected" is TRUE for a transient failure (overload, rate
+        # limit, max turns) but flatly wrong for an authentication failure: that one repeats
+        # forever, so promising otherwise sends the user off writing messages that can't be
+        # delivered. Say what actually fixes it instead.
+        if authstate.is_auth_error_text(detail) or authstate.is_auth_error_text(subtype):
+            return (f"Last turn ended with an error ({reason}). The Claude CLI's login is no "
+                    f"longer valid, so further messages will fail too — sign in again in a "
+                    f"terminal:  {self._AUTH_FIX}")
         return f"Last turn ended with an error ({reason}). Your next message is unaffected."
 
     @staticmethod
@@ -2835,10 +2852,75 @@ class Overlay:
         self._send_or_stop()
         return "break"
 
+    # ── the CLI's login ──
+    _AUTH_FIX = "claude auth login"      # the one command that repairs it, in a terminal
+
+    def _auth_notice(self):
+        """The full explanation + fix, shown once per death (see _auth_watchdog)."""
+        return ("⚠ The Claude CLI's login has expired and it cleared its stored credentials, "
+                "so every message will fail until you sign in again — restarting the overlay "
+                f"cannot fix this.\n    In a terminal, run:  {self._AUTH_FIX}\n    "
+                "(if it complains, run  claude auth logout  first). The overlay notices the "
+                "new login on its own — no restart needed.")
+
+    def _auth_watchdog(self, now):
+        """Poll the CLI's stored login and announce each TRANSITION, so a dead login is
+        reported the moment it happens (or the moment the overlay is opened onto one) rather
+        than only when the user sends and loses a message. Cheap: one stat(), plus a ~1KB
+        JSON read only when the file changed. Recovery is announced too — after signing in
+        elsewhere, the user shouldn't have to guess whether the overlay noticed."""
+        if now - self._auth_checked < AUTH_CHECK_INTERVAL:
+            return
+        self._auth_checked = now
+        try:
+            dead = authstate.dead_reason() is not None
+        except Exception:
+            return                       # never let a credential read break the pump
+        if dead == self._auth_dead:
+            return
+        self._auth_dead = dead
+        if dead:
+            self._auth_told = True
+            dbg("auth", "stored login is blank — sends held back")
+            self.add_err(self._auth_notice())
+        else:
+            self._auth_told = False
+            dbg("auth", "stored login looks usable again")
+            self.add_sys("✅ Claude CLI login restored — your next message will go through.")
+
+    def _auth_blocks_send(self):
+        """True when this send must be held back because the CLI's stored login is provably
+        unusable. Nothing is consumed when it returns True, so the typed text and every
+        attachment stay exactly where they are — that is the whole point: the failing turn
+        would otherwise swallow both. Re-checked here rather than trusting the watchdog's
+        cached flag, so a death that happened seconds ago is caught on this very send."""
+        if not AUTH_GATE:
+            return False
+        # Nothing to send anyway (empty box, no auto-shot, no attachments): stay quiet and let
+        # the normal empty-send no-op happen, so Enter on an empty box can't nag about login.
+        if not (self._entry_text() or self.auto_shot or self.pending_shot or self.pending_images):
+            return False
+        try:
+            if authstate.dead_reason() is None:
+                return False
+        except Exception:
+            return False                 # no evidence → never stand in the way of a send
+        self._auth_dead = True
+        self._auth_checked = time.monotonic()      # the watchdog needn't re-announce this
+        if not self._auth_told:
+            self._auth_told = True
+            self.add_err(self._auth_notice())
+        else:
+            self.add_err("⚠ Still signed out — nothing was sent. Run "
+                         f"{self._AUTH_FIX} in a terminal; your message is still here.")
+        return True
+
     def _send_or_stop(self):
         if self.busy:
             self.worker.interrupt()
             self._set_status("stopping…")
+            return
+        if self._auth_blocks_send():     # BEFORE anything is consumed (text, shot, attachments)
             return
         text = self._entry_text()
         shots = None
@@ -3531,6 +3613,11 @@ class Overlay:
                     self._last_ext_fg = hw
             except Exception:
                 pass
+        # Credential watchdog: the CLI's login can be killed from outside this process (a
+        # failed refresh in ANY claude process blanks the shared credential file), and it can
+        # be repaired from outside too (a terminal `claude auth login`). Poll it so both are
+        # announced on their own. Throttled to AUTH_CHECK_INTERVAL — one stat() per tick.
+        self._auth_watchdog(self._last_pump)
         if DEBUG_LOG and (self._last_pump - getattr(self, "_pump_logged", 0.0)) > 10.0:
             self._pump_logged = self._last_pump
             try:

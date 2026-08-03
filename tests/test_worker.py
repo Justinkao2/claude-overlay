@@ -985,3 +985,132 @@ class TestResumeStreamedVerification:
         events = _drain(w.ui)
         assert ("resume_lost", None) not in events
         assert ("session", "s-1") in events
+
+
+# ---------------------------------------------------------------------------
+# 14. Auth recycle (a login the subprocess can no longer use)
+# ---------------------------------------------------------------------------
+
+class TestAuthErrorTracking:
+    """An errored result that is an AUTH failure arms one recycle attempt; a clean turn
+    disarms it again. Non-auth errors must not arm it (they'd trigger pointless
+    reconnects on every overload)."""
+
+    def _result(self, is_error, detail, subtype="success"):
+        from claude_agent_sdk import ResultMessage
+        return ResultMessage(subtype=subtype, duration_ms=1, duration_api_ms=1,
+                             is_error=is_error, num_turns=1, session_id="s-1",
+                             result=detail)
+
+    def test_auth_error_arms_the_recycle(self):
+        w = make_worker()
+        w._dispatch(self._result(
+            True, "Failed to authenticate: OAuth session expired and could not be refreshed"), {})
+        assert w._auth_error_seen is True
+
+    def test_other_error_does_not_arm_it(self):
+        w = make_worker()
+        w._dispatch(self._result(True, "The model was overloaded (HTTP 529).",
+                                 subtype="overloaded_error"), {})
+        assert w._auth_error_seen is False
+
+    def test_clean_turn_disarms_it(self):
+        w = make_worker()
+        w._auth_error_seen = True
+        w._auth_recycled = True
+        w._dispatch(self._result(False, "all good"), {})
+        assert w._auth_error_seen is False
+        assert w._auth_recycled is False
+
+    def test_reply_text_mentioning_oauth_is_not_an_auth_error(self):
+        """A successful answer that happens to discuss OAuth must not arm anything."""
+        w = make_worker()
+        w._dispatch(self._result(
+            False, "Your OAuth session expired handling is in auth.py"), {})
+        assert w._auth_error_seen is False
+
+
+class TestAuthRecycle:
+    """_auth_recycle rebuilds the CLI subprocess when its cached login can't be trusted:
+    the credential file changed under us, or the last turn was rejected on auth. It must
+    also NOT reconnect on every turn, and must never loop."""
+
+    def _prep(self, w, sig, connected=True):
+        """Stub the reconnect + the credential fingerprint; record whether it reconnected."""
+        calls = []
+
+        async def _fake_reconnect(note=None):
+            calls.append(note)
+        w._reconnect = _fake_reconnect
+        w._client = object() if connected else None
+        worker_module.authstate.signature = lambda: sig
+        return calls
+
+    def setup_method(self):
+        self._real_sig = worker_module.authstate.signature
+
+    def teardown_method(self):
+        worker_module.authstate.signature = self._real_sig
+
+    def test_unchanged_credentials_do_not_reconnect(self):
+        w = make_worker()
+        w._creds_sig = (111, 22)
+        calls = self._prep(w, (111, 22))
+        asyncio.run(w._auth_recycle())
+        assert calls == []
+
+    def test_changed_credentials_reconnect(self):
+        w = make_worker()
+        w._creds_sig = (111, 22)
+        calls = self._prep(w, (999, 33))
+        asyncio.run(w._auth_recycle())
+        assert len(calls) == 1
+        assert "refreshed elsewhere" in calls[0]
+        assert w._creds_sig == (999, 33)      # re-pinned, so it fires once, not every turn
+
+    def test_unreadable_credentials_do_not_reconnect(self):
+        """signature() returns None when the file can't be stat'ed — absence of evidence
+        must not be read as "the tokens changed"."""
+        w = make_worker()
+        w._creds_sig = (111, 22)
+        calls = self._prep(w, None)
+        asyncio.run(w._auth_recycle())
+        assert calls == []
+        assert w._creds_sig == (111, 22)
+
+    def test_first_turn_after_connect_does_not_reconnect(self):
+        """_creds_sig is None only if the fingerprint was never taken; nothing to compare."""
+        w = make_worker()
+        w._creds_sig = None
+        calls = self._prep(w, (111, 22))
+        asyncio.run(w._auth_recycle())
+        assert calls == []
+
+    def test_auth_error_triggers_one_retry(self):
+        w = make_worker()
+        w._creds_sig = (111, 22)
+        w._auth_error_seen = True
+        calls = self._prep(w, (111, 22))
+        asyncio.run(w._auth_recycle())
+        assert len(calls) == 1
+        assert "stale login" in calls[0]
+        assert w._auth_recycled is True
+
+    def test_auth_error_does_not_loop(self):
+        w = make_worker()
+        w._creds_sig = (111, 22)
+        w._auth_error_seen = True
+        calls = self._prep(w, (111, 22))
+        asyncio.run(w._auth_recycle())
+        asyncio.run(w._auth_recycle())
+        asyncio.run(w._auth_recycle())
+        assert len(calls) == 1                # one attempt per failure, then it stops
+
+    def test_no_client_is_a_noop(self):
+        w = make_worker()
+        w._creds_sig = (111, 22)
+        w._auth_error_seen = True
+        calls = self._prep(w, (999, 33), connected=False)
+        asyncio.run(w._auth_recycle())
+        assert calls == []                    # _run_turn opens a fresh client itself
+        assert w._creds_sig == (999, 33)      # still re-pinned so the next turn is quiet

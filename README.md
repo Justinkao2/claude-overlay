@@ -375,6 +375,13 @@ The settings themselves:
   session **it** recorded, not "the latest conversation in this directory" — if you
   continue that session elsewhere (the CLI or Desktop) afterward, resume still loads its
   newest state, but the "from … ago" label is measured from the overlay's last turn.
+- `CLAUDE_OVERLAY_AUTH_GATE` (env var) — when the `claude` CLI's login dies in the one
+  way nothing local can repair (a token refresh rejected with `invalid_grant` makes the
+  CLI blank its own stored credentials), the overlay says so and **holds your message
+  back** instead of feeding it — and its attachments — into a turn that cannot succeed.
+  Set it to `0` to keep the notice but never block a send. Signing in again from a
+  terminal (`claude auth login`) is picked up on its own: no restart, and the
+  conversation is kept.
 - `AUTO_SCREENSHOT_DEFAULT`, `FONT_SANS/SERIF/MONO`, `CORNER_RADIUS`, `ORB_SIZE`,
   `HIDE_SCREENSHOT_TOOL`, `WINDOW_ALPHA` — see inline comments.
 

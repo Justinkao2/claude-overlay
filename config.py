@@ -8,7 +8,7 @@ import json
 import os
 from pathlib import Path
 
-__version__ = "1.14.0"
+__version__ = "1.14.1"
 
 def _env_int(name: str, default: int, min_value: int, max_value: int) -> int:
     try:
@@ -223,6 +223,20 @@ RESUME_OFFER_MAX_AGE = 7 * 24 * 3600   # only offer to resume a conversation you
                             # (seconds). Days-old context is rarely what you want back, and the
                             # CLI eventually cleans up old session files anyway (then a click
                             # would just fall back to a fresh session with a notice).
+AUTH_GATE = _env_bool("CLAUDE_OVERLAY_AUTH_GATE", True)   # when the `claude` CLI has cleared
+                            # its own stored login (an invalid_grant refresh failure blanks the
+                            # credential file — see authstate.py), EVERY message fails until the
+                            # user signs in again. With this on, the overlay says so and holds
+                            # the send back instead of consuming the typed prompt and its
+                            # attachments into a turn that cannot succeed. Detection is one-sided
+                            # (only the CLI's own on-disk "dead" marker counts, and it stands
+                            # down for API-key/Bedrock/Vertex/apiKeyHelper setups), but set
+                            # CLAUDE_OVERLAY_AUTH_GATE=0 to never hold a send back — the notice
+                            # still appears, it just stops blocking.
+AUTH_CHECK_INTERVAL = 20.0  # seconds between credential-file checks in the UI pump. One stat()
+                            # plus (only when it changed) a ~1KB JSON read, so it stays off the
+                            # streaming path; frequent enough that a re-login in a terminal is
+                            # noticed on its own, without the user poking the overlay first.
 
 SYSTEM_APPEND = (
     "You are running as an always-on-top floating overlay assistant on the user's "

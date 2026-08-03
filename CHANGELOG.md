@@ -3,6 +3,34 @@
 All notable changes to Claude Overlay are documented here.
 This project follows [Semantic Versioning](https://semver.org/).
 
+## [1.14.1] — 2026-08-04
+
+### Fixed
+- **"OAuth session expired and could not be refreshed" is no longer a dead end.** When
+  the `claude` CLI's token refresh is rejected, the CLI blanks its own stored credentials
+  — after which *every* message fails, in every process, until you sign in again;
+  restarting the overlay cannot help. The overlay used to report the CLI's error and then
+  add "Your next message is unaffected", which is true for an overload but flatly wrong
+  here, so you'd keep writing messages that could never be delivered. Now it recognises
+  the failure, says what actually fixes it (`claude auth login` in a terminal), and
+  **holds the send back** rather than swallowing your typed prompt and its attachments
+  into a turn that cannot succeed — nothing is consumed, so your message is still there
+  afterwards. The login is polled in the background too, so a death is announced when it
+  happens (or when you open the overlay onto one) and the **recovery** is announced as
+  well: sign in from any terminal and the overlay picks it up on its own, no restart.
+  Detection is deliberately one-sided — only the CLI's own on-disk "dead" marker counts,
+  and it stands down entirely for API-key / Bedrock / Vertex / `apiKeyHelper` setups — so
+  it can't refuse a message that would have worked. `CLAUDE_OVERLAY_AUTH_GATE=0` keeps the
+  notice but stops it blocking.
+- **A login refreshed elsewhere no longer poisons the running session.** The CLI caches
+  the tokens it read at startup, so the long-lived subprocess the overlay holds open can
+  end up using a superseded copy — and a copy it already failed to refresh is marked dead
+  *inside that process only*. The overlay now fingerprints the credential file and, when
+  it changes (any process's refresh, or your own re-login), recycles the CLI subprocess
+  before the next turn — with `--resume`, so the conversation is kept. Same recycle is
+  tried once after an auth-rejected turn, which fully recovers the case where the tokens
+  on disk were fine all along.
+
 ## [1.14.0] — 2026-07-23
 
 ### Added
@@ -789,6 +817,7 @@ Initial public release.
   edge/corner resize, paste images (Ctrl+V), text zoom (Ctrl +/−), global hotkey
   (Ctrl+Alt+Space).
 
+[1.14.1]: https://github.com/shengyanlin/claude-overlay/releases/tag/v1.14.1
 [1.14.0]: https://github.com/shengyanlin/claude-overlay/releases/tag/v1.14.0
 [1.13.0]: https://github.com/shengyanlin/claude-overlay/releases/tag/v1.13.0
 [1.12.2]: https://github.com/shengyanlin/claude-overlay/releases/tag/v1.12.2
