@@ -290,6 +290,12 @@ The usual causes, all of which `Diagnose.cmd` names outright:
 | `claude-agent-sdk` older than the app | `pip install --upgrade claude-agent-sdk` |
 | A ZIP "update" that replaced only `claude_overlay.py` | Unzip **all** files over the folder |
 
+**On v1.15.1 specifically:** if double-clicking the launcher opens a console window saying
+no Python was found — on a machine where the overlay used to work — that is a bug in
+v1.15.1's interpreter check, not your install. Update to **v1.15.2 or later**
+(`update.cmd`, or `git pull`). If you can't launch anything at all, the fix needs no
+Python: re-download the latest ZIP and replace `Start Claude Overlay.cmd`.
+
 ---
 
 ## Controls

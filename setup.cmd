@@ -16,8 +16,8 @@ rem Goto-structured (NOT nested parentheses) on purpose: a parenthesized block e
 rem %PY%/%DOPY% at parse time, so a value set by `set /p` inside it would read stale. Labels
 rem let each line expand when reached.
 set "PY="
-py -3 --version >nul 2>nul && set "PY=py -3"
-if not defined PY ( python --version >nul 2>nul && set "PY=python" )
+call py -3 --version >nul 2>nul && set "PY=py -3"
+if not defined PY ( call python --version >nul 2>nul && set "PY=python" )
 if defined PY goto pyfound
 
 echo [X] Python 3 was not found on this PC.
@@ -32,8 +32,8 @@ echo.
 rem Re-detect. The PATH is NOT refreshed inside this window, so after the install also look in
 rem the per-user dir where winget / the python.org installer place Python.
 set "PY="
-py -3 --version >nul 2>nul && set "PY=py -3"
-if not defined PY ( python --version >nul 2>nul && set "PY=python" )
+call py -3 --version >nul 2>nul && set "PY=py -3"
+if not defined PY ( call python --version >nul 2>nul && set "PY=python" )
 if defined PY goto pyfound
 rem (recurse from Programs\Python for python.exe -- a wildcard MID-path like Python3*\python.exe
 rem  is NOT matched by `dir /s`, so search the base dir for the filename instead)
@@ -51,7 +51,7 @@ pause & exit /b 1
 :pyfound
 rem Read the version robustly for EVERY form of %PY% -- including a quoted full path with spaces,
 rem which would break `for /f ... in ('%PY% ...')`; a temp file sidesteps the quoting entirely.
-%PY% --version > "%TEMP%\_ov_pyver.txt" 2>&1
+call %PY% --version > "%TEMP%\_ov_pyver.txt" 2>&1
 set "PYVER="
 set /p PYVER=<"%TEMP%\_ov_pyver.txt"
 del "%TEMP%\_ov_pyver.txt" >nul 2>nul
@@ -107,10 +107,10 @@ rem --- 3. Python packages ---
 echo.
 rem Make sure pip exists FIRST. Some Python installs ship without it, or `pip` isn't on
 rem PATH even though `python` is; `python -m pip` + ensurepip is the robust path.
-%PY% -m pip --version >nul 2>nul
+call %PY% -m pip --version >nul 2>nul
 if errorlevel 1 (
   echo pip not found - bootstrapping it with ensurepip ...
-  %PY% -m ensurepip --upgrade
+  call %PY% -m ensurepip --upgrade
   if errorlevel 1 (
     echo [X] Could not bootstrap pip. Reinstall Python from https://www.python.org/downloads/
     echo     ^(make sure the "pip" optional feature stays ticked^), then re-run setup.cmd.
@@ -119,7 +119,7 @@ if errorlevel 1 (
 )
 echo Installing Python packages: claude-agent-sdk, pillow, keyboard ...
 echo (Any "installed in ... which is not on PATH" warnings below are harmless.)
-%PY% -m pip install --upgrade claude-agent-sdk pillow keyboard
+call %PY% -m pip install --upgrade claude-agent-sdk pillow keyboard
 if errorlevel 1 (
   echo [X] pip install failed. See the error above.
   pause & exit /b 1
@@ -131,12 +131,12 @@ rem them is invisible: the overlay launches under pythonw, so a bad install show
 rem a double-click that does nothing at all. Check it here, while someone is watching.
 echo.
 echo Checking that the app can load ...
-%PY% "%~dp0preflight.py" >nul 2>nul
+call %PY% "%~dp0preflight.py" >nul 2>nul
 if errorlevel 1 (
   echo.
   echo [X] Setup finished, but the app cannot start yet. Details:
   echo.
-  %PY% "%~dp0preflight.py"
+  call %PY% "%~dp0preflight.py"
   echo.
   echo     Fix what's listed above, then run Diagnose.cmd to re-check.
   pause & exit /b 1

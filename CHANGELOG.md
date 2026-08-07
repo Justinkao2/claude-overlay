@@ -3,6 +3,68 @@
 All notable changes to Claude Overlay are documented here.
 This project follows [Semantic Versioning](https://semver.org/).
 
+## [1.15.2] - 2026-08-07
+
+### Fixed
+- **A regression in v1.15.1: the launcher refused to start on machines where it always
+  had.** v1.15.1 checked that `pythonw` was real before using it, but it checked the
+  wrong file — the `python.exe` sitting *next to* `pythonw.exe`. That is a different
+  binary, so the answer could be wrong in both directions. If `python.exe` was missing,
+  blocked, renamed or non-zero for any reason at all, a perfectly good `pythonw` was
+  discarded and the launcher printed `[X] No working Python was found` — a working
+  install turned into a wall. (And in the other direction, a healthy `python.exe` could
+  vouch for a `pythonw` that was itself a dead Store alias.)
+
+  The check now **runs the exact binary it is about to launch**. `pythonw` cannot print
+  its own version — it has no console — but its exit code still comes back, and that is
+  all a check ever needed.
+
+  Verified against five machine profiles. v1.15.2 starts everywhere v1.14.0 did, plus
+  one profile neither earlier version could start:
+
+  | Machine | v1.14.0 | v1.15.1 | v1.15.2 |
+  | --- | --- | --- | --- |
+  | `pythonw` works, `python.exe` check fails | starts | **wall** | starts |
+  | Only the App-execution-alias stub | silent nothing | explains | explains |
+  | Normal python.org install | starts | starts | starts |
+  | `python.exe` works, `pythonw` broken | silent nothing | silent nothing | **starts** |
+  | No Python at all | message | message | message |
+
+- **The launcher can no longer dead-end while a usable `pythonw` is sitting on PATH.**
+  After the verified candidates it tries a plain `python.exe` (which leaves a console
+  window behind the overlay — ugly, but everything that goes wrong is now visible), and
+  finally launches the first `pythonw` on PATH unverified, exactly as every release
+  before v1.15.1 did. A wrong "no Python" wall is worse than the silent failure the
+  check was added to prevent. The one candidate never tried blind is the alias stub
+  itself, which is the only case that check really existed for.
+- **A `pythonw` that is a `.bat`/`.cmd` shim killed the launcher outright.** `where
+  pythonw` legitimately returns a shim on machines managed by pyenv-win and by several
+  conda wrappers. Running a batch file from a batch file *without* `call` transfers
+  control and never returns, so the launcher ended silently in the middle of its own
+  check — no window, no message, exactly the symptom it exists to prevent. Every
+  interpreter invocation in every shipped `.cmd` now goes through `call`, and a test
+  asserts it structurally, because this failure is invisible on any machine whose Python
+  is a plain `.exe`.
+- **And such a shim could not be started even once found.** `start "" "some.bat" "arg"`
+  becomes `cmd /K "some.bat" "arg"`, and cmd strips the outer quotes off a command that
+  both begins and ends with one — so a shim whose path contains a space never ran, and
+  left an idle console window sitting where the overlay should have been. Shims are now
+  started as `cmd /c call ...`, which keeps the quoting intact and closes the window with
+  the app. Plain `.exe` interpreters are still launched directly, so the common path is
+  byte-for-byte unchanged.
+- **The "no Python" message now prints what the machine actually has** — the raw
+  `where pythonw` / `where python` / `where py` output — instead of only asserting that
+  nothing was found. A report that doesn't say what it looked at can't be acted on.
+- **`update.cmd` could not find the launcher's interpreter at all** on those same
+  machines, so it refreshed packages into a different Python or refused outright. It now
+  resolves `pythonw` by running it, and falls back to `pythonw` itself rather than to
+  whichever Python happens to be first on PATH.
+- **`Diagnose.cmd` gave up on exactly the machines it exists for.** It shared the same
+  proxy check, so it answered `[X] No working Python was found` on installs that had
+  one. It now reports under the launcher's own interpreter — `pythonw`'s output does
+  reach a redirected file even with no console — prints which interpreter that is, and
+  falls back to the raw `where` output instead of just giving up.
+
 ## [1.15.1] — 2026-08-07
 
 ### Fixed

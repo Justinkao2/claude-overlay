@@ -41,18 +41,26 @@ rem "Start Claude Overlay.cmd" runs `pythonw` from PATH; on a machine with two P
 rem (a common one: python.org plus the Microsoft Store build) upgrading the wrong one
 rem leaves the app running against packages nobody refreshed - and the symptom of that
 rem is a launch that silently does nothing.
-rem Verify with --version rather than `where`: a Win11 box without Python still has the
-rem Store alias stub %LOCALAPPDATA%\...\WindowsApps\python.exe, which `where` finds but
-rem which only prints "Python was not found".
+rem Verify by RUNNING each candidate, not by testing a different file: a Win11 box
+rem without Python still has the Store alias stub in %LOCALAPPDATA%\...\WindowsApps\,
+rem which `where` finds but which only prints "Python was not found".
 set "PYW="
 set "PY="
-for /f "usebackq delims=" %%i in (`where pythonw 2^>nul`) do if not defined PYW set "PYW=%%i"
-if defined PYW (
-  set "PY=!PYW:pythonw.exe=python.exe!"
-  "!PY!" --version >nul 2>nul || set "PY="
-)
-if not defined PY ( py -3 --version >nul 2>nul && set "PY=py -3" )
-if not defined PY ( python --version >nul 2>nul && set "PY=python" )
+rem Every probe goes through `call`: `where` can return a .bat/.cmd shim (pyenv-win and
+rem some conda wrappers install one), and running a batch file from a batch file without
+rem `call` transfers control and never returns -- which would end this script mid-check.
+for /f "usebackq delims=" %%i in (`where pythonw 2^>nul`) do if not defined PYW (call "%%i" -c "pass" >nul 2>nul && set "PYW=%%i")
+rem pip's output is invisible under pythonw (no console), so drive pip with the
+rem python.exe beside it WHEN that one also runs - same install, same site-packages,
+rem readable output. When it doesn't, use pythonw itself anyway: upgrading the right
+rem environment matters more than watching it happen, and `if errorlevel 1` below still
+rem catches a failure. Only the launcher's own interpreter is ever the right target.
+set "SIB="
+if defined PYW set "SIB=!PYW:pythonw.exe=python.exe!"
+if defined SIB (call "!SIB!" -c "pass" >nul 2>nul && set PY="!SIB!")
+if not defined PY if defined PYW set PY="!PYW!"
+if not defined PY ( call py -3 -c "pass" >nul 2>nul && set "PY=py -3" )
+if not defined PY ( call python -c "pass" >nul 2>nul && set "PY=python" )
 
 if not defined PY (
   echo.
@@ -61,7 +69,7 @@ if not defined PY (
 ) else (
   echo.
   echo Refreshing Python packages with !PY! ...
-  %PY% -m pip install --upgrade claude-agent-sdk pillow keyboard
+  call %PY% -m pip install --upgrade claude-agent-sdk pillow keyboard
   rem An interrupted or proxy-blocked upgrade can leave a package UNINSTALLED - pip
   rem removes the old version before installing the new one. Saying "[OK] Updated" over
   rem the top of that is how an update turns into a launch that does nothing, so the
@@ -89,13 +97,13 @@ rem "the update told me". preflight loads the app exactly the way the launcher w
 if defined PY (
   echo.
   echo Checking that the updated app can load...
-  %PY% "%~dp0preflight.py" >nul 2>nul
+  call %PY% "%~dp0preflight.py" >nul 2>nul
   if errorlevel 1 (
     echo.
     echo [X] The update left this install unable to start.
     echo     Run Diagnose.cmd for the details ^(and what fixes it^).
     echo.
-    %PY% "%~dp0preflight.py"
+    call %PY% "%~dp0preflight.py"
     pause & exit /b 1
   )
   echo [OK] The app loads.
