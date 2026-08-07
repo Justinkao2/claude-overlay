@@ -3,6 +3,21 @@
 All notable changes to Claude Overlay are documented here.
 This project follows [Semantic Versioning](https://semver.org/).
 
+## [1.15.1] — 2026-08-07
+
+### Fixed
+- **The last silent way to fail: `Start Claude Overlay.cmd` launching a Python that
+  isn't one.** Windows 11 ships an "App execution alias" stub at
+  `%LOCALAPPDATA%\Microsoft\WindowsApps\pythonw.exe` that `where pythonw` finds *even
+  when Python isn't installed*. Starting it opens the Microsoft Store, or does nothing
+  at all — and the overlay never appears. This was the one case v1.15.0's crash
+  reporting could not help with, because no Python ever ran to report anything. The
+  launcher now verifies the interpreter (via the `python.exe` next to it — `pythonw`
+  can't print its own version) before using it, falls back to the `py` launcher's
+  windowed twin, and if nothing works says so and points at `Diagnose.cmd` instead of
+  closing in silence. It **verifies rather than reorders**: a setup that works today
+  keeps using exactly the interpreter it always did.
+
 ## [1.15.0] — 2026-08-07
 
 ### Added
