@@ -120,9 +120,17 @@ if errorlevel 1 (
     pause & exit /b 1
   )
 )
-echo Installing Python packages: claude-agent-sdk, pillow, keyboard ...
+rem requirements.txt is the single source of the version list. This used to name the
+rem packages here instead, so the file constrained nobody and every user got whatever PyPI
+rem shipped that morning - while this machine stayed on the version it first installed.
+if not exist "%~dp0requirements.txt" (
+  echo [X] requirements.txt is missing, so there is nothing to install from.
+  echo     Re-download the ZIP and unzip ALL of it over this folder.
+  pause & exit /b 1
+)
+echo Installing the Python packages listed in requirements.txt ...
 echo (Any "installed in ... which is not on PATH" warnings below are harmless.)
-call %PY% -m pip install --upgrade claude-agent-sdk pillow keyboard
+call %PY% -m pip install --upgrade -r "%~dp0requirements.txt"
 if errorlevel 1 (
   echo [X] pip install failed. See the error above.
   pause & exit /b 1

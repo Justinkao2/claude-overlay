@@ -61,11 +61,16 @@ def repo_dir():
     return os.path.dirname(os.path.abspath(__file__))
 
 
-def pip_command():
+def pip_command(interpreter=None):
     """The install command for THIS interpreter. Spelled with sys.executable rather than
     a bare `pip`, because "I already installed it" almost always means "into the other
-    Python" — this is the only form that can't land in the wrong one."""
-    return f'"{sys.executable}" -m pip install --upgrade claude-agent-sdk pillow keyboard'
+    Python" — this is the only form that can't land in the wrong one.
+
+    Installs from requirements.txt rather than naming the packages, so following this
+    advice cannot land a version the app was never tested against. Naming them here is how
+    the pinned file ended up constraining nobody."""
+    return '"%s" -m pip install --upgrade -r "%s"' % (
+        interpreter or sys.executable, os.path.join(repo_dir(), "requirements.txt"))
 
 
 def required_sdk_symbols():
@@ -219,7 +224,7 @@ def check():
             f"overlay:\n         this report : {sys.executable}\n"
             f"         the launcher: {launcher}\n"
             "       Packages installed here do nothing for the app.",
-            f'"{launcher}" -m pip install --upgrade claude-agent-sdk pillow keyboard'))
+            pip_command(launcher)))
 
     # --- the thing the overlay actually drives ----------------------------------
     if not _claude_cli_path():

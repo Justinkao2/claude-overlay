@@ -205,7 +205,8 @@ class ClaudeWorker(threading.Thread):
             fn = getattr(client, "set_permission_mode", None)
             if fn is None:   # pre-0.1 SDKs: no runtime switching — keep the mode truthful
                 raise RuntimeError("this claude-agent-sdk can't switch permission modes "
-                                   "at run time — update it (pip install -U claude-agent-sdk)")
+                                   "at run time — run update.cmd to install the pinned "
+                                   "version")
             try:
                 await fn(mode)
             except Exception:
@@ -527,9 +528,8 @@ class ClaudeWorker(threading.Thread):
                     self._session_id = None      # this connect is FRESH, not the resumed id
                     self.ui.put(("system",
                         "⚠ Your claude-agent-sdk is too old to resume a conversation "
-                        "(no --resume support) — started a fresh session. Update it "
-                        "(pip install --upgrade claude-agent-sdk) to keep conversations "
-                        "across restarts."))
+                        "(no --resume support) — started a fresh session. Run update.cmd "
+                        "to keep conversations across restarts."))
                     return
                 # The conversation continues under this id until the CLI's init/result
                 # messages report the continuation id (see _set_session), which also
@@ -588,7 +588,7 @@ class ClaudeWorker(threading.Thread):
             elif isinstance(e, TypeError):   # ClaudeAgentOptions rejected a kwarg → SDK too old
                 self.ui.put(("error",
                     f"Your claude-agent-sdk looks too old ({type(e).__name__}: {e}). "
-                    "Update it:  pip install --upgrade claude-agent-sdk  (or run update.cmd)."))
+                    "Run update.cmd to install the version this release was tested with."))
             elif authstate.is_auth_error_text(e):
                 # The CLI itself refused on authentication — the generic "is it installed?"
                 # advice below would send the user looking in the wrong place entirely.

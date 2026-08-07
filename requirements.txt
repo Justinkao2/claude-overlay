@@ -1,3 +1,15 @@
-claude-agent-sdk>=0.2.87
-pillow>=10.0
-keyboard>=0.13.5
+# Pinned, not floored, and this file is what setup.cmd / update.cmd actually install.
+#
+# It used to say `claude-agent-sdk>=0.2.87` while both scripts ran
+# `pip install --upgrade claude-agent-sdk pillow keyboard` with the versions hardcoded --
+# so this file constrained nobody, and every user got whatever PyPI shipped that morning.
+# The author's own machine sat on the floor version (0.2.87) while colleagues were 45
+# releases ahead on 0.2.132: a breaking SDK release would hit all of them at once, on a
+# machine the author cannot reproduce it on. Colleagues are not the canary.
+#
+# So: an exact pin for the SDK, which is pre-1.0 and moves several times a week, and
+# upgrading is a deliberate act -- bump it here, run the suite, release. A range is fine
+# for the two that have been stable for years.
+claude-agent-sdk==0.2.132
+pillow>=10.0,<13
+keyboard>=0.13.5,<0.14

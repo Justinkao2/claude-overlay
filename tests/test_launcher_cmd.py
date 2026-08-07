@@ -32,7 +32,7 @@ LAUNCHER = os.path.join(ROOT, "Start Claude Overlay.cmd")
 # The .cmd files that have to agree about where Python can be found. They are separate
 # scripts on purpose (a user may copy just one out of a ZIP), so the shared block is
 # duplicated text -- and duplicated text is what drifts. See the identity test below.
-SHARES_DISCOVERY = ("Start Claude Overlay.cmd", "Diagnose.cmd", "update.cmd")
+SHARES_DISCOVERY = ("Start Claude Overlay.cmd", "Diagnose.cmd", "update-finish.cmd")
 BEGIN = "rem ---- BEGIN find-pythonw"
 END = "rem ---- END find-pythonw"
 
@@ -169,17 +169,81 @@ def test_the_launcher_never_decides_usability_from_a_different_binary():
                 f"{name}:{lineno} judges pythonw by the python.exe beside it")
 
 
+def test_update_does_not_run_git_pull_from_the_file_git_is_replacing():
+    """`git pull` overwrites update.cmd while it is running, and cmd.exe reads the script
+    it is executing from disk by byte offset -- so afterwards it resumes at that offset
+    inside whatever now lives there. It came out right the two times it was watched,
+    because the line numbers happened to line up. So the pull must not happen in the copy
+    that git can replace: update.cmd re-execs itself out of %TEMP% first."""
+    text = read("update.cmd")
+    lines = text.splitlines()
+    guard = next((i for i, l in enumerate(lines) if '"%~1"=="--from-temp"' in l), None)
+    assert guard is not None, "update.cmd no longer re-execs itself from outside the repo"
+    pull = next(i for i, l in enumerate(lines)
+                if l.strip().startswith("git pull") and not l.lstrip().startswith("rem "))
+    assert guard < pull, (
+        f"update.cmd:{pull + 1} runs `git pull` before handing off to the copy in %TEMP% "
+        f"(guard at line {guard + 1}), so git can rewrite the script mid-run again")
+
+
+def test_the_post_pull_half_is_a_separate_file():
+    """update.cmd's own body cannot be trusted after the pull, and the post-pull work
+    should run the version that was just DOWNLOADED rather than the one being replaced.
+    Both of those need it to live in its own file."""
+    finish = os.path.join(ROOT, "update-finish.cmd")
+    assert os.path.exists(finish), "update-finish.cmd is gone; update.cmd calls it"
+    assert 'call "update-finish.cmd"' in read("update.cmd"), (
+        "update.cmd no longer hands off to update-finish.cmd")
+
+
+def test_nothing_installs_a_hardcoded_package_list():
+    """requirements.txt is the single source of the version list. It used to say
+    `claude-agent-sdk>=0.2.87` while setup.cmd and update.cmd both ran
+    `pip install --upgrade claude-agent-sdk pillow keyboard` -- so the file constrained
+    nobody, every user got whatever PyPI shipped that morning, and this machine stayed on
+    the floor version. A pin that the install path ignores is decoration."""
+    pattern = re.compile(r"pip\s+install[^\r\n]*?(claude-agent-sdk|pillow|keyboard)")
+    offenders = []
+    for name in sorted(os.listdir(ROOT)):
+        if not name.lower().endswith((".cmd", ".py")) or name == os.path.basename(__file__):
+            continue
+        path = os.path.join(ROOT, name)
+        if not os.path.isfile(path):
+            continue
+        for lineno, line in enumerate(
+                open(path, encoding="utf-8").read().splitlines(), 1):
+            if pattern.search(line) and "-r " not in line:
+                offenders.append(f"{name}:{lineno}: {line.strip()}")
+    assert not offenders, (
+        "install command names packages instead of -r requirements.txt:\n"
+        + "\n".join(offenders))
+
+
+def test_the_sdk_is_pinned_not_floored():
+    """The asymmetry this closes: with a bare `>=` plus `--upgrade`, every colleague gets
+    whatever PyPI published this morning while the author's machine sits on the version it
+    first installed -- so a breaking release hits all of them at once, on a machine that
+    cannot reproduce it. Colleagues are not the canary."""
+    lines = [l.strip() for l in read("requirements.txt").splitlines()
+             if l.strip() and not l.strip().startswith("#")]
+    sdk = next((l for l in lines if l.lower().startswith("claude-agent-sdk")), None)
+    assert sdk, "claude-agent-sdk is missing from requirements.txt"
+    assert "==" in sdk, (
+        f"claude-agent-sdk must be pinned, got {sdk!r}. The SDK is pre-1.0 and ships "
+        "several releases a week; upgrading has to be a deliberate, tested act.")
+
+
 def test_update_can_fall_back_to_pythonw_itself():
-    """update.cmd prefers the sibling python.exe for readable pip output. That preference
-    must stay a preference: if the sibling doesn't run, the launcher's own pythonw is
-    still the right environment to install into, and refusing is how these machines got
-    stuck un-updatable."""
-    text = open(os.path.join(ROOT, "update.cmd"), encoding="ascii").read()
+    """update-finish.cmd prefers the sibling python.exe for readable pip output. That
+    preference must stay a preference: if the sibling doesn't run, the launcher's own
+    pythonw is still the right environment to install into, and refusing is how these
+    machines got stuck un-updatable."""
+    text = read("update-finish.cmd")
     body = [l for l in text.splitlines() if not l.lstrip().startswith("rem ")]
     sibling_line = next(i for i, l in enumerate(body) if "pythonw.exe=python.exe" in l)
     later = "\n".join(body[sibling_line:])
     assert 'if not defined PY if defined PYW set PY="!PYW!"' in later, (
-        "update.cmd derives the sibling python.exe but has no fallback to pythonw itself")
+        "update-finish.cmd derives the sibling python.exe but has no fallback to pythonw")
 
 
 # --------------------------------------------------------------------------------------
@@ -322,11 +386,16 @@ def _fabricate_offpath_python(tmp_path):
     It is a copy of pythonw.exe with its DLLs plus a `pythonw._pth` naming the real
     stdlib, which is the documented way to pin a relocated interpreter's search path.
     Copying the whole install would be more literal and costs ~100 MB per run; a junction
-    to the real one would let a stray rmtree walk into somebody's Python installation."""
-    home = os.path.dirname(sys.executable)
+    to the real one would let a stray rmtree walk into somebody's Python installation.
+
+    `sys.base_prefix`, not `dirname(sys.executable)`: inside a virtualenv the latter is
+    `.../Scripts`, whose `pythonw.exe` is a stub that redirects to the base interpreter.
+    Copying that stub next to a `._pth` produced a process that hung until the timeout --
+    a test failure that said nothing about the launcher."""
+    home = sys.base_prefix
     pyw = os.path.join(home, "pythonw.exe")
     if not os.path.exists(pyw):
-        pytest.fail(f"test premise unavailable: no pythonw.exe beside {sys.executable}")
+        pytest.fail(f"test premise unavailable: no pythonw.exe in {home}")
     dst = tmp_path / "lad" / "Programs" / "Python" / os.path.basename(home)
     dst.mkdir(parents=True)
     shutil.copy2(pyw, str(dst / "pythonw.exe"))
@@ -348,11 +417,14 @@ def test_python_where_setup_installs_it_but_not_on_path_still_launches(tmp_path)
     app, marker, env = _sandbox(
         tmp_path, os.path.join("Microsoft", "WindowsApps"), "@exit /b 9009\n")
     fabricated = _fabricate_offpath_python(tmp_path)
-    probe = subprocess.run([str(fabricated), "-c", "pass"], timeout=60)
-    if probe.returncode != 0:
+    try:
+        rc = subprocess.run([str(fabricated), "-c", "pass"], timeout=30).returncode
+    except subprocess.TimeoutExpired:
+        rc = "hung"
+    if rc != 0:
         pytest.fail("test premise unavailable: the relocated interpreter at "
-                    f"{fabricated} exits {probe.returncode}, so this test cannot say "
-                    "anything about the launcher")
+                    f"{fabricated} came back {rc!r}, so this test cannot say anything "
+                    "about the launcher either way")
 
     env["LOCALAPPDATA"] = str(tmp_path / "lad")
     # Neutralise the launcher's OTHER off-PATH candidates, so only the folder setup.cmd

@@ -1,7 +1,39 @@
 @echo off
-rem Update Claude Overlay to the latest version (git pull + refresh packages).
-cd /d "%~dp0"
+rem Update Claude Overlay to the latest version (git pull, then update-finish.cmd).
+rem
+rem This script runs itself from a COPY in %TEMP%, and that is not paranoia. `git pull`
+rem below replaces this very file, and cmd.exe reads the script it is executing from disk
+rem by BYTE OFFSET as it goes -- so after the pull it carries on at that offset inside
+rem whatever now lives there. It came out right the two times it was observed, because the
+rem line numbers happened to line up; a one-line edit is enough to make it resume in the
+rem middle of a different command, and nothing would say so. Running from %TEMP% puts the
+rem executing bytes somewhere git cannot touch.
+rem
+rem Everything below is inside ONE parenthesised block on purpose: cmd parses a block to
+rem its closing paren BEFORE running any of it, so the hand-off and the exit are already in
+rem memory and are not re-read from a file that may have changed underneath.
+rem
+rem The folder is passed as "%~dp0." and not "%~dp0": %~dp0 always ends in a backslash, and
+rem a quoted argument ending in \" is the classic Windows quote-escape trap.
 setlocal enabledelayedexpansion
+if /i not "%~1"=="--from-temp" (
+  copy /y "%~f0" "%TEMP%\_ov_update.cmd" >nul
+  if errorlevel 1 (
+    echo [X] Could not stage the updater in "%TEMP%". Is the disk full?
+    pause
+    exit /b 1
+  )
+  cmd /c call "%TEMP%\_ov_update.cmd" --from-temp "%~dp0."
+  set "RC=!errorlevel!"
+  del "%TEMP%\_ov_update.cmd" >nul 2>nul
+  exit /b !RC!
+)
+
+rem ---------------------------------------------------------------------------------
+rem From here on we ARE the copy in %TEMP%, and %2 is the folder to update.
+rem ---------------------------------------------------------------------------------
+cd /d "%~2"
+if errorlevel 1 ( echo [X] Cannot enter "%~2". & pause & exit /b 1 )
 echo ============================================================
 echo   Claude Overlay - update
 echo ============================================================
@@ -35,97 +67,15 @@ if errorlevel 1 (
   pause & exit /b 1
 )
 
-rem --- refresh Python packages ------------------------------------------------
-rem Into the interpreter the LAUNCHER uses, not whichever one `py -3` happens to pick.
-rem "Start Claude Overlay.cmd" runs `pythonw` from PATH; on a machine with two Pythons
-rem (a common one: python.org plus the Microsoft Store build) upgrading the wrong one
-rem leaves the app running against packages nobody refreshed - and the symptom of that
-rem is a launch that silently does nothing.
-rem Verify by RUNNING each candidate, not by testing a different file: a Win11 box
-rem without Python still has the Store alias stub in %LOCALAPPDATA%\...\WindowsApps\,
-rem which `where` finds but which only prints "Python was not found".
-rem Every probe goes through `call`: `where` can return a .bat/.cmd shim (pyenv-win and
-rem some conda wrappers install one), and running a batch file from a batch file without
-rem `call` transfers control and never returns -- which would end this script mid-check.
-rem And PATH is not the whole world: setup.cmd installs into
-rem %LOCALAPPDATA%\Programs\Python\Python3xx\ and finds it there by scanning. Refreshing
-rem packages into "whatever is on PATH" while the launcher runs a Python that is not, is
-rem how an update reports success and changes nothing the app will load.
-rem ---- BEGIN find-pythonw (kept identical in Diagnose.cmd and update.cmd) ----
-set "PYW="
-for /f "usebackq delims=" %%i in (`where pythonw 2^>nul`) do if not defined PYW (call "%%i" -c "pass" >nul 2>nul && set "PYW=%%i")
-if not defined PYW for /f "delims=" %%p in ('dir /b /s /a-d /o-n "%LOCALAPPDATA%\Programs\Python\pythonw.exe" 2^>nul') do if not defined PYW (call "%%p" -c "pass" >nul 2>nul && set "PYW=%%p")
-if not defined PYW for /d %%d in ("%ProgramFiles%\Python3*") do if not defined PYW (call "%%d\pythonw.exe" -c "pass" >nul 2>nul && set "PYW=%%d\pythonw.exe")
-if not defined PYW for /d %%d in ("%SystemDrive%\Python3*") do if not defined PYW (call "%%d\pythonw.exe" -c "pass" >nul 2>nul && set "PYW=%%d\pythonw.exe")
-rem ---- END find-pythonw ----
-
-set "PY="
-rem pip's output is invisible under pythonw (no console), so drive pip with the
-rem python.exe beside it WHEN that one also runs - same install, same site-packages,
-rem readable output. When it doesn't, use pythonw itself anyway: upgrading the right
-rem environment matters more than watching it happen, and `if errorlevel 1` below still
-rem catches a failure. Only the launcher's own interpreter is ever the right target.
-set "SIB="
-if defined PYW set "SIB=!PYW:pythonw.exe=python.exe!"
-if defined SIB (call "!SIB!" -c "pass" >nul 2>nul && set PY="!SIB!")
-if not defined PY if defined PYW set PY="!PYW!"
-if not defined PY ( call py -3 -c "pass" >nul 2>nul && set "PY=py -3" )
-if not defined PY ( call python -c "pass" >nul 2>nul && set "PY=python" )
-if not defined PY for /f "delims=" %%p in ('dir /b /s /a-d /o-n "%LOCALAPPDATA%\Programs\Python\python.exe" 2^>nul') do if not defined PY (call "%%p" -c "pass" >nul 2>nul && set PY="%%p")
-
-if not defined PY (
+rem --- hand the rest to the code we JUST downloaded ----------------------------
+rem Deliberately the freshly pulled update-finish.cmd rather than a copy of whatever
+rem shipped with the version being replaced: the post-pull half has to match the code it
+rem is about to check, and it is the half that knows where this release looks for Python.
+if not exist "update-finish.cmd" (
   echo.
-  echo [!] No working Python found, so packages were NOT refreshed.
-  echo     The code above IS updated - only the packages were skipped.
-  echo     Double-click setup.cmd: it installs Python when it is missing
-  echo     ^(per-user, no admin^) and then installs the packages too.
-) else (
-  echo.
-  echo Refreshing Python packages with !PY! ...
-  call %PY% -m pip install --upgrade claude-agent-sdk pillow keyboard
-  rem An interrupted or proxy-blocked upgrade can leave a package UNINSTALLED - pip
-  rem removes the old version before installing the new one. Saying "[OK] Updated" over
-  rem the top of that is how an update turns into a launch that does nothing, so the
-  rem failure has to stop the script.
-  if errorlevel 1 (
-    echo.
-    echo [X] Refreshing the packages FAILED ^(see the pip output above^).
-    echo     Your install may now be incomplete - do not skip this.
-    echo     Retry, or run it yourself:
-    echo       %PY% -m pip install --upgrade claude-agent-sdk pillow keyboard
-    echo     Then double-click Diagnose.cmd to confirm the app can load.
-    pause & exit /b 1
-  )
+  echo [!] The code updated, but update-finish.cmd is not in this folder, so the
+  echo     packages were NOT refreshed. Double-click setup.cmd to finish.
+  pause & exit /b 1
 )
-
-rem --- refresh the desktop shortcut icon IF one already exists ---
-rem The .lnk is machine-specific (gitignored), so git pull can't touch it. If a "Claude
-rem Overlay" shortcut is on the Desktop, re-point it at the current icon. We skip this when
-rem there's no shortcut, so update.cmd never creates one the user didn't ask for.
-powershell -NoProfile -ExecutionPolicy Bypass -Command "$d=[Environment]::GetFolderPath('Desktop'); if (Test-Path (Join-Path $d 'Claude Overlay.lnk')) { & '.\create-shortcut.ps1'; Write-Host '[OK] Desktop shortcut icon refreshed.' }"
-
-rem --- prove the updated install can actually start ---------------------------
-rem Checking here is the whole difference between "it broke and I don't know why" and
-rem "the update told me". preflight loads the app exactly the way the launcher will.
-if defined PY (
-  echo.
-  echo Checking that the updated app can load...
-  call %PY% "%~dp0preflight.py" >nul 2>nul
-  if errorlevel 1 (
-    echo.
-    echo [X] The update left this install unable to start.
-    echo     Run Diagnose.cmd for the details ^(and what fixes it^).
-    echo.
-    call %PY% "%~dp0preflight.py"
-    pause & exit /b 1
-  )
-  echo [OK] The app loads.
-)
-
-echo.
-echo ============================================================
-echo   [OK] Updated. IMPORTANT: close the running overlay and
-echo   re-open it ^("Start Claude Overlay.cmd"^) for the changes
-echo   to take effect - it does not reload while running.
-echo ============================================================
-pause
+call "update-finish.cmd"
+exit /b %errorlevel%

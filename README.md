@@ -287,7 +287,7 @@ The usual causes, all of which `Diagnose.cmd` names outright:
 |---|---|
 | A `pip install` was interrupted (flaky network, proxy) and left a package uninstalled | Re-run `setup.cmd` |
 | Two Pythons — packages installed into the one that *isn't* launching the app | Use the exact `pip` command `Diagnose.cmd` prints |
-| `claude-agent-sdk` older than the app | `pip install --upgrade claude-agent-sdk` |
+| `claude-agent-sdk` older than the app | Run `update.cmd` — it installs the pinned version from `requirements.txt` |
 | A ZIP "update" that replaced only `claude_overlay.py` | Unzip **all** files over the folder |
 
 **On v1.15.1 and v1.15.2 specifically:** if double-clicking the launcher opens a console
