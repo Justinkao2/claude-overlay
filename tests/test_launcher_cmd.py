@@ -29,15 +29,21 @@ def cmd_files():
 
 
 # --------------------------------------------------------------------------------------
-# File-format conventions. These .cmd files are shipped and double-clicked, so a stray
-# BOM or CRLF is not cosmetic: cmd.exe will read the BOM as part of the first command.
+# File-format conventions. These .cmd files are shipped and double-clicked, so the two
+# things below are not cosmetic: cmd.exe reads a BOM as part of the first command, and it
+# decodes the file in the machine's OEM codepage, where a non-ASCII byte can mean
+# something different than it did on the author's machine.
+#
+# Line endings are deliberately NOT asserted. Git translates them per checkout (the
+# Windows CI runner and every Windows clone get CRLF from the same LF blobs), so pinning
+# them would be pinning an artifact of how the repo was cloned rather than a property of
+# the shipped script -- and cmd.exe is happy with either.
 # --------------------------------------------------------------------------------------
 
-def test_every_cmd_file_is_ascii_lf_and_bom_free():
+def test_every_cmd_file_is_ascii_and_bom_free():
     for name in cmd_files():
         raw = open(os.path.join(ROOT, name), "rb").read()
         assert not raw.startswith(b"\xef\xbb\xbf"), f"{name}: UTF-8 BOM"
-        assert b"\r\n" not in raw, f"{name}: CRLF (repo convention is LF)"
         assert all(b < 128 for b in raw), f"{name}: non-ASCII byte"
 
 
