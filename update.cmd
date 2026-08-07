@@ -34,6 +34,11 @@ rem From here on we ARE the copy in %TEMP%, and %2 is the folder to update.
 rem ---------------------------------------------------------------------------------
 cd /d "%~2"
 if errorlevel 1 ( echo [X] Cannot enter "%~2". & pause & exit /b 1 )
+rem Absolute from here on. This script lives in %TEMP% now, so %~dp0 is NOT the app folder
+rem -- and `call "update-finish.cmd"` on its own does not work either: cmd looks up a
+rem quoted bare filename as a literal program name and reports
+rem '"update-finish.cmd"' is not recognized. Caught by running this, not by reading it.
+set "REPO=%CD%"
 echo ============================================================
 echo   Claude Overlay - update
 echo ============================================================
@@ -71,11 +76,11 @@ rem --- hand the rest to the code we JUST downloaded ---------------------------
 rem Deliberately the freshly pulled update-finish.cmd rather than a copy of whatever
 rem shipped with the version being replaced: the post-pull half has to match the code it
 rem is about to check, and it is the half that knows where this release looks for Python.
-if not exist "update-finish.cmd" (
+if not exist "%REPO%\update-finish.cmd" (
   echo.
   echo [!] The code updated, but update-finish.cmd is not in this folder, so the
   echo     packages were NOT refreshed. Double-click setup.cmd to finish.
   pause & exit /b 1
 )
-call "update-finish.cmd"
+call "%REPO%\update-finish.cmd"
 exit /b %errorlevel%

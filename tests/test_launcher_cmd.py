@@ -192,8 +192,14 @@ def test_the_post_pull_half_is_a_separate_file():
     Both of those need it to live in its own file."""
     finish = os.path.join(ROOT, "update-finish.cmd")
     assert os.path.exists(finish), "update-finish.cmd is gone; update.cmd calls it"
-    assert 'call "update-finish.cmd"' in read("update.cmd"), (
+    text = read("update.cmd")
+    assert 'call "%REPO%\\update-finish.cmd"' in text, (
         "update.cmd no longer hands off to update-finish.cmd")
+    # The hand-off must be ABSOLUTE. The driver runs from %TEMP%, so %~dp0 is the wrong
+    # folder there, and `call "update-finish.cmd"` fails outright: cmd looks up a quoted
+    # bare filename as a literal program name.
+    assert '%~dp0update-finish.cmd' not in text, (
+        "update.cmd resolves update-finish.cmd via %~dp0, which is %TEMP% for the driver")
 
 
 def test_nothing_installs_a_hardcoded_package_list():
