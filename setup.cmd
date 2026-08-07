@@ -125,10 +125,30 @@ if errorlevel 1 (
   pause & exit /b 1
 )
 
+rem --- 4. prove it can actually start ---------------------------------------
+rem "Setup completed" and "the app runs" are not the same claim, and the gap between
+rem them is invisible: the overlay launches under pythonw, so a bad install shows up as
+rem a double-click that does nothing at all. Check it here, while someone is watching.
+echo.
+echo Checking that the app can load ...
+%PY% "%~dp0preflight.py" >nul 2>nul
+if errorlevel 1 (
+  echo.
+  echo [X] Setup finished, but the app cannot start yet. Details:
+  echo.
+  %PY% "%~dp0preflight.py"
+  echo.
+  echo     Fix what's listed above, then run Diagnose.cmd to re-check.
+  pause & exit /b 1
+)
+echo [OK] The app loads.
+
 echo.
 echo ============================================================
 echo   Done. Before first launch make sure you have logged in
 echo   with YOUR OWN Claude subscription (claude auth login).
 echo   Then double-click:  "Start Claude Overlay.cmd"
+echo.
+echo   If it ever fails to open, double-click:  Diagnose.cmd
 echo ============================================================
 pause

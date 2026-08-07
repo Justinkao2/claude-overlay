@@ -3,6 +3,52 @@
 All notable changes to Claude Overlay are documented here.
 This project follows [Semantic Versioning](https://semver.org/).
 
+## [1.15.0] — 2026-08-07
+
+### Added
+- **A failed launch now says why, instead of doing nothing.** The overlay runs under
+  `pythonw` so that it has no console window — which also meant that any error before
+  the window appeared killed it with no window, no message and no log. From the outside
+  that is "I updated it and now double-clicking does nothing", and it is unfixable at a
+  distance: there is nothing to send anyone. Startup failures are now caught and
+  reported **in a dialog** that names the cause *and the single command that fixes it*,
+  and written to **`%LOCALAPPDATA%\claude-overlay\crash.log`** together with the facts
+  these bugs actually turn on — which interpreter is running, which package versions it
+  has, where the app is installed. Crashes *after* startup are covered too, including a
+  worker thread dying: that used to leave a window that simply never answered again.
+  A console run prints instead of showing a modal (so an automated run can't hang);
+  `CLAUDE_OVERLAY_DIALOG=1`/`0` forces either way.
+- **`Diagnose.cmd`** — double-click it and get one readable report: which Python the
+  launcher uses, what's installed in it, whether the app actually loads (it tries, in a
+  real subprocess), and the tail of the crash log. The report is copied to your
+  clipboard, so "it won't open" can be a paste instead of a conversation. Every problem
+  it finds comes with the exact command that fixes it, spelled with the full path to the
+  interpreter that needs it — because "I already installed it" is nearly always "into
+  the other Python", and a bare `pip install` in the instructions can land in the wrong
+  one all over again.
+- **`setup.cmd` and `update.cmd` now verify the result** instead of announcing success.
+  Both load the app the way the launcher will and refuse to finish quietly if it can't
+  start.
+
+### Fixed
+- **An update could leave the install broken and still report `[OK] Updated`.**
+  `update.cmd` refreshed the Python packages with `pip --quiet` and never checked
+  whether pip succeeded. Since pip uninstalls the old version before installing the
+  new one, an interrupted or proxy-blocked upgrade can leave a package *gone* — and the
+  next launch then did nothing at all, with the update having declared itself fine. pip
+  failures are now fatal and explained.
+- **`update.cmd` refreshed the wrong Python on a two-Python machine.** It used the `py`
+  launcher while `Start Claude Overlay.cmd` runs whatever `pythonw` resolves to; where
+  those differ (python.org plus the Microsoft Store build is the common pair) the
+  upgrade landed in an interpreter the app never uses. It now resolves the launcher's
+  interpreter first, and the diagnostics call out a mismatch explicitly.
+- **The documented way to update from a ZIP produced a guaranteed crash.** Both
+  `update.cmd` and the README told anyone without git to unzip over the folder and "at
+  minimum replace `claude_overlay.py`". That was true when the overlay was a single
+  script and has been wrong since it was split into modules — the new file imports
+  siblings that a partial copy doesn't have. The instructions now say to replace every
+  file, and doing it the old way produces an explanatory dialog rather than silence.
+
 ## [1.14.1] — 2026-08-04
 
 ### Fixed

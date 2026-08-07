@@ -25,18 +25,96 @@ import time
 import queue
 from pathlib import Path
 
-import tkinter as tk
-from tkinter import font as tkfont
+# Before anything that can fail: give a startup crash somewhere to go. The launcher runs
+# this under pythonw, which has no console — so without a reporter installed first, every
+# import below can kill the process with no window, no message and no log. That is the
+# "I updated it, now double-clicking does nothing" bug: not a mystery, just an invisible
+# ImportError. crashreport is stdlib-only precisely so it still works when the imports it
+# is protecting are the broken thing.
+try:
+    import crashreport
+except Exception as _boot_err:
+    # crashreport.py itself is missing — which means this file was copied over an older
+    # install on its own. That used to be the documented way to update from the ZIP, and
+    # it stopped working when the app was split into modules: claude_overlay.py now needs
+    # its siblings. Handled inline, with no imports beyond ctypes, because the reporter
+    # that would normally say this is exactly the file that isn't there.
+    _msg = ("Claude Overlay is missing part of itself (crashreport.py), so it can't "
+            "start.\n\nThis happens when only claude_overlay.py was replaced during an "
+            "update. The app is a folder of files now, not a single script.\n\nFix: "
+            "re-download the whole folder — run update.cmd (git), or unzip ALL files "
+            "from the latest ZIP over this one.\n\nFolder:\n"
+            + os.path.dirname(os.path.abspath(__file__)))
+    try:
+        import ctypes as _ct
+        _ct.windll.user32.MessageBoxW(None, _msg, "Claude Overlay", 0x10 | 0x10000)
+    except Exception:
+        pass
+    try:
+        sys.stderr and sys.stderr.write(_msg + "\n")
+    except Exception:
+        pass
+    raise SystemExit(1)
 
-from PIL import Image, ImageGrab, ImageDraw, ImageChops, ImageFilter, ImageTk
+crashreport.install()
 
-from config import *
-from config import __version__
-from debuglog import dbg, DEBUG_LOG
-from win32utils import *
-from win32utils import _user32, _gdi32
-from worker import ClaudeWorker
-import authstate
+
+def _report_import_failure(exc):
+    """Turn a failed startup import into a message that names the fix.
+
+    The raw traceback is necessary but not sufficient: "ModuleNotFoundError: PIL" tells
+    a developer everything and a colleague nothing. preflight turns it into which
+    interpreter is running, what's missing from it, and the one command that repairs it —
+    so the dialog is actionable without a round trip to whoever maintains this."""
+    detail = ""
+    try:
+        import preflight
+        detail = preflight.summary(preflight.check()) + "\n\n"
+    except Exception:
+        pass
+    try:
+        import traceback as _tb
+        detail += "".join(_tb.format_exception(type(exc), exc, exc.__traceback__))
+    except Exception:
+        detail += repr(exc)
+    crashreport.report(
+        f"Claude Overlay couldn't start: {exc.__class__.__name__}: {exc}", detail,
+        app_version=_file_version())
+    # As the launched app there is nothing left to do but say so and leave. When merely
+    # IMPORTED (CI's import smoke, the tests, preflight's subprocess check) the exception
+    # must keep propagating — swallowing it would turn a red build green.
+    if __name__ == "__main__":
+        os._exit(1)
+    raise exc
+
+
+def _file_version():
+    """config.__version__ without importing config — config may be what failed."""
+    try:
+        import re as _re
+        src = open(os.path.join(os.path.dirname(os.path.abspath(__file__)), "config.py"),
+                   encoding="utf-8").read()
+        m = _re.search(r'^__version__\s*=\s*"([^"]+)"', src, _re.M)
+        return m.group(1) if m else ""
+    except Exception:
+        return ""
+
+
+try:
+    import tkinter as tk
+    from tkinter import font as tkfont
+
+    from PIL import Image, ImageGrab, ImageDraw, ImageChops, ImageFilter, ImageTk
+
+    from config import *
+    from config import __version__
+    from debuglog import dbg, DEBUG_LOG
+    from win32utils import *
+    from win32utils import _user32, _gdi32
+    from worker import ClaudeWorker
+    import authstate
+except Exception as _e:
+    _report_import_failure(_e)
 
 # ───────────────────────────── the overlay UI ─────────────────────────────
 PLACEHOLDER = "Reply to Claude…"
@@ -3870,10 +3948,14 @@ def _selfheal_taskbar_shortcut():
 
 
 if __name__ == "__main__":
-    set_dpi_awareness()
-    set_app_user_model_id()   # before any window, so the taskbar uses our icon
-    _selfheal_taskbar_shortcut()
-    try:
-        Overlay().run()
-    except KeyboardInterrupt:
-        sys.exit(0)
+    # Everything from here to mainloop() runs before there is a window to show an error
+    # in, so a failure would otherwise be invisible (see crashreport). The guard writes
+    # the traceback to %LOCALAPPDATA%\claude-overlay\crash.log and puts it on screen.
+    with crashreport.guard("starting up", __version__):
+        set_dpi_awareness()
+        set_app_user_model_id()   # before any window, so the taskbar uses our icon
+        _selfheal_taskbar_shortcut()
+        try:
+            Overlay().run()
+        except KeyboardInterrupt:
+            sys.exit(0)

@@ -231,7 +231,9 @@ git pull
 ```
 
 (Installed via **ZIP** instead of `git clone`? Re-download the latest ZIP from the green
-**Code** button and unzip it over the folder — at minimum replace `claude_overlay.py`.)
+**Code** button and unzip **all** of it over the folder, replacing every file. The
+overlay is a folder of modules, not a single script — replacing only `claude_overlay.py`
+leaves it unable to start. Then double-click **`Diagnose.cmd`** to confirm it loads.)
 
 > **Then restart the overlay.** It's a long-running process and does **not** reload
 > while running — close it and re-open **`Start Claude Overlay.cmd`** for the update to
@@ -266,6 +268,27 @@ Double-click **`Create Desktop Shortcut.cmd`** to drop a **Claude Overlay** shor
 > Don't just drag `Start Claude Overlay.cmd` to your Desktop — it's a portable
 > launcher that must stay next to `claude_overlay.py`. The shortcut points back to it
 > in place, which is why it keeps working.
+
+### It doesn't open / it vanishes
+
+The overlay runs under `pythonw`, which has no console — so if it fails to start there
+is nothing to read. It tells you anyway:
+
+- **A dialog appears** naming what broke and the one command that fixes it.
+- **The details are saved** to `%LOCALAPPDATA%\claude-overlay\crash.log`.
+- **Double-click `Diagnose.cmd`** for a full report — which Python is running it, which
+  packages are installed, whether the app loads — copied to your clipboard, ready to
+  paste into a bug report. It's the fastest way to get help from someone who isn't at
+  your machine.
+
+The usual causes, all of which `Diagnose.cmd` names outright:
+
+| What happened | Fix |
+|---|---|
+| A `pip install` was interrupted (flaky network, proxy) and left a package uninstalled | Re-run `setup.cmd` |
+| Two Pythons — packages installed into the one that *isn't* launching the app | Use the exact `pip` command `Diagnose.cmd` prints |
+| `claude-agent-sdk` older than the app | `pip install --upgrade claude-agent-sdk` |
+| A ZIP "update" that replaced only `claude_overlay.py` | Unzip **all** files over the folder |
 
 ---
 
