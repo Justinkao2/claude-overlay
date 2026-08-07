@@ -70,8 +70,15 @@ set "REPORT=%TEMP%\claude-overlay-report.txt"
 call !PY! "%~dp0preflight.py" > "%REPORT%" 2>&1
 type "%REPORT%"
 
-rem Best-effort clipboard copy so the report can just be pasted into a message.
-type "%REPORT%" | clip >nul 2>nul && echo (This report has been copied to your clipboard.)
+rem Best-effort clipboard copy so the report can just be pasted into a message. That is the
+rem point of it for the person who has a broken install -- but it does replace whatever they
+rem had copied, so anyone running this to CHECK something (rather than to report it) can pass
+rem --no-clip and keep their clipboard.
+if /i "%~1"=="--no-clip" (
+  echo ^(Clipboard left alone: --no-clip.^)
+) else (
+  type "%REPORT%" | clip >nul 2>nul && echo (This report has been copied to your clipboard.)
+)
 echo.
 echo Saved to: %REPORT%
 echo.
