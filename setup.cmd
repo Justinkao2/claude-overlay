@@ -18,6 +18,9 @@ rem let each line expand when reached.
 set "PY="
 call py -3 --version >nul 2>nul && set "PY=py -3"
 if not defined PY ( call python --version >nul 2>nul && set "PY=python" )
+rem Look where this script installs, BEFORE offering to install again: a previous run may
+rem have put Python in %LOCALAPPDATA%\Programs\Python\ without PATH ever catching up.
+if not defined PY for /f "delims=" %%p in ('dir /b /s /a-d /o-n "%LOCALAPPDATA%\Programs\Python\python.exe" 2^>nul') do if not defined PY (call "%%p" --version >nul 2>nul && set PY="%%p")
 if defined PY goto pyfound
 
 echo [X] Python 3 was not found on this PC.

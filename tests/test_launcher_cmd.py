@@ -6,12 +6,20 @@ so a machine where `python.exe` was missing or blocked had its perfectly good `p
 thrown away and got `[X] No working Python was found` instead of an app. Nothing in the
 Python test suite could see it, because the failure happened before Python started.
 
+v1.15.2 fixed that and still walled machines that had Python, because it only ever looked
+at PATH -- while setup.cmd installs Python into %LOCALAPPDATA%\\Programs\\Python\\Python3xx\\
+and finds it there by SCANNING, since the PATH in its own window is stale. So setup could
+print "[OK] The app loads." on a machine the launcher then declared Pythonless.
+
 So the invariants here are behavioural -- the launcher is actually run against fabricated
-PATHs -- rather than assertions about its text. The one that matters is the one that
-broke: *the launcher must not dead-end while a usable `pythonw` is sitting on PATH.*
-Wording changes freely; that property must not.
+PATHs -- rather than assertions about its text. The two that matter are the two that
+broke: *the launcher must not dead-end while a usable interpreter exists*, on PATH or in
+the folder setup.cmd installs into. Wording changes freely; those properties must not.
 """
+import glob
 import os
+import re
+import shutil
 import subprocess
 import sys
 import time
@@ -21,11 +29,28 @@ import pytest
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 LAUNCHER = os.path.join(ROOT, "Start Claude Overlay.cmd")
 
+# The .cmd files that have to agree about where Python can be found. They are separate
+# scripts on purpose (a user may copy just one out of a ZIP), so the shared block is
+# duplicated text -- and duplicated text is what drifts. See the identity test below.
+SHARES_DISCOVERY = ("Start Claude Overlay.cmd", "Diagnose.cmd", "update.cmd")
+BEGIN = "rem ---- BEGIN find-pythonw"
+END = "rem ---- END find-pythonw"
+
 windows_only = pytest.mark.skipif(sys.platform != "win32", reason="cmd.exe launchers")
 
 
 def cmd_files():
     return sorted(f for f in os.listdir(ROOT) if f.lower().endswith(".cmd"))
+
+
+def read(name):
+    return open(os.path.join(ROOT, name), encoding="ascii").read()
+
+
+def discovery_block(name):
+    text = read(name)
+    assert BEGIN in text and END in text, f"{name}: missing the find-pythonw markers"
+    return text.split(BEGIN, 1)[1].split(END, 1)[0]
 
 
 # --------------------------------------------------------------------------------------
@@ -69,22 +94,65 @@ def test_every_interpreter_invocation_goes_through_call():
 
     Asserted structurally, because the failure is invisible on any machine whose Python
     is a plain .exe: it would pass every manual test the author could think to run."""
-    tokens = ("python ", "pythonw ", "pyw ", "py -3 ", "%PY%", "!PY!", "%%i", "!PYW!",
-              "!SIB!", "!RAW!")
+    tokens = ("python ", "pythonw ", "pyw ", "py -3 ", "%PY%", "!PY!", "%%i", "%%p",
+              "%%d", "!PYW!", "!SIB!", "!RAW!")
+    # `if`/`for`/`(` only decide WHETHER a command runs, so strip them and judge the
+    # command underneath. Skipping such lines wholesale -- as this test first did -- left
+    # every probe in the new directory-scanning block unexamined, which is precisely
+    # where an un-`call`ed invocation would hide next.
+    _if = r'if\s+(?:not\s+)?'
+    prefixes = (_if + r'defined\s+\S+', _if + r'errorlevel\s+\d+',
+                _if + r'(?:/i\s+)?\S+==\S+',
+                r'for\s+/\S+\s+(?:"[^"]*"\s+)?%%\w+\s+in\s+\(.*?\)\s+do',
+                r'\(')
+    # `start` spawns a new process, so control transfer is not a concern there. `set`,
+    # `echo`, `where` and `dir` never execute the interpreter, they only name it.
+    harmless = ("call ", "start ", "set ", "echo", "where ", "dir ", "rem ", "::")
     offenders = []
     for name in cmd_files():
-        text = open(os.path.join(ROOT, name), encoding="ascii").read()
-        for lineno, line in enumerate(text.splitlines(), 1):
+        for lineno, line in enumerate(read(name).splitlines(), 1):
             s = line.strip()
+            while True:
+                m = re.match("(?:%s)\\s*" % "|".join(prefixes), s, re.IGNORECASE)
+                if not m or not m.end():
+                    break
+                s = s[m.end():]
             low = s.lower()
-            if low.startswith(("rem ", "echo", "::", "where ", "set ", "if ")) or not s:
-                continue
-            # `start` spawns a new process, so control transfer is not a concern there.
-            if low.startswith(("start ", "call ", "for ")) or "start \"\"" in low:
+            if not s or low.startswith(harmless):
                 continue
             if any(t.lower() in low for t in tokens):
                 offenders.append(f"{name}:{lineno}: {s}")
     assert not offenders, "interpreter invoked without `call`:\n" + "\n".join(offenders)
+
+
+def test_every_script_that_finds_python_finds_it_the_same_way():
+    """Three scripts, one question. When they answered it differently the answers were
+    silently inconsistent: v1.15.1's sibling-python bug shipped in all three, and
+    update.cmd's copy meant an affected machine could not even refresh packages into the
+    interpreter its launcher would use. They are separate files (someone may copy just
+    one out of a ZIP), so the block is duplicated -- and duplicated text drifts unless
+    something compares it."""
+    blocks = {name: discovery_block(name) for name in SHARES_DISCOVERY}
+    reference = blocks[SHARES_DISCOVERY[0]]
+    for name, block in blocks.items():
+        assert block == reference, (
+            f"{name}'s find-pythonw block has drifted from "
+            f"{SHARES_DISCOVERY[0]}'s.\n--- {name} ---\n{block}\n--- reference ---\n{reference}")
+
+
+def test_the_launcher_searches_where_setup_installs():
+    """The v1.15.3 defect, pinned as a contract between two files rather than as a magic
+    string. setup.cmd both installs Python into this folder and scans it to find what it
+    installed; a launcher that does not look there can refuse to start an install setup
+    just declared healthy -- and no message on screen connects the two."""
+    setup = read("setup.cmd")
+    installdir = r"%LOCALAPPDATA%\Programs\Python"
+    assert installdir in setup, (
+        "setup.cmd no longer references %s -- update this test and the launcher "
+        "together, because the point is that they agree" % installdir)
+    for name in SHARES_DISCOVERY:
+        assert installdir in discovery_block(name), (
+            f"{name} never looks in {installdir}, which is where setup.cmd puts Python")
 
 
 def test_the_launcher_never_decides_usability_from_a_different_binary():
@@ -161,6 +229,15 @@ def _sandbox(tmp_path, shim_dir, shim_body=None):
     # python / py / pyw can rescue the run and blur what is being tested.
     env["PATH"] = f"{shim};{os.path.join(os.environ['SystemRoot'], 'System32')}"
     env["OVERLAY_MARKER"] = str(marker)
+
+    # The launcher also searches OFF PATH now, so point every one of those roots at an
+    # empty folder. Otherwise the author's own C:\Python3xx would satisfy the tests that
+    # assert a refusal, and they would pass for a reason that has nothing to do with the
+    # case under test -- on the CI runner, where no such folder exists, they would fail.
+    for var in ("LOCALAPPDATA", "ProgramFiles", "SystemDrive"):
+        blank = tmp_path / ("no_" + var.lower())
+        blank.mkdir(exist_ok=True)
+        env[var] = str(blank)
     return app, marker, env
 
 
@@ -233,3 +310,60 @@ def test_no_python_at_all_reports_what_it_looked_at(tmp_path):
     assert not _wait_for(marker, seconds=3)
     assert "Could not start Claude Overlay" in out
     assert "(nothing found)" in out, f"give-up path printed no evidence\n{out}"
+    # "No Python on PATH" and "no Python on this PC" need different fixes, and the report
+    # is the only thing that separates them for whoever is reading it.
+    assert "OFF PATH" in out, f"report cannot distinguish PATH from install\n{out}"
+
+
+def _fabricate_offpath_python(tmp_path):
+    """A real, working interpreter at the exact path setup.cmd installs to, reachable
+    ONLY by scanning that folder -- never through PATH.
+
+    It is a copy of pythonw.exe with its DLLs plus a `pythonw._pth` naming the real
+    stdlib, which is the documented way to pin a relocated interpreter's search path.
+    Copying the whole install would be more literal and costs ~100 MB per run; a junction
+    to the real one would let a stray rmtree walk into somebody's Python installation."""
+    home = os.path.dirname(sys.executable)
+    pyw = os.path.join(home, "pythonw.exe")
+    if not os.path.exists(pyw):
+        pytest.fail(f"test premise unavailable: no pythonw.exe beside {sys.executable}")
+    dst = tmp_path / "lad" / "Programs" / "Python" / os.path.basename(home)
+    dst.mkdir(parents=True)
+    shutil.copy2(pyw, str(dst / "pythonw.exe"))
+    for dll in (glob.glob(os.path.join(home, "python3*.dll"))
+                + glob.glob(os.path.join(home, "vcruntime*.dll"))):
+        shutil.copy2(dll, str(dst))
+    (dst / "pythonw._pth").write_text(
+        "%s\n%s\n%s\n" % (os.path.join(home, "Lib"), os.path.join(home, "DLLs"),
+                          os.path.join(home, "Lib", "site-packages")), encoding="ascii")
+    return dst / "pythonw.exe"
+
+
+@windows_only
+def test_python_where_setup_installs_it_but_not_on_path_still_launches(tmp_path):
+    """THE v1.15.3 regression, reproduced end to end: PATH holds nothing but dead
+    App-execution-alias stubs, and a working Python sits where setup.cmd puts it.
+    v1.15.2 printed "no Python on PATH ran" here and started nothing -- on a machine
+    where setup.cmd had already reported success."""
+    app, marker, env = _sandbox(
+        tmp_path, os.path.join("Microsoft", "WindowsApps"), "@exit /b 9009\n")
+    fabricated = _fabricate_offpath_python(tmp_path)
+    probe = subprocess.run([str(fabricated), "-c", "pass"], timeout=60)
+    if probe.returncode != 0:
+        pytest.fail("test premise unavailable: the relocated interpreter at "
+                    f"{fabricated} exits {probe.returncode}, so this test cannot say "
+                    "anything about the launcher")
+
+    env["LOCALAPPDATA"] = str(tmp_path / "lad")
+    # Neutralise the launcher's OTHER off-PATH candidates, so only the folder setup.cmd
+    # installs into can rescue this run and a pass cannot come from the test machine
+    # happening to have C:\Python3xx.
+    env["ProgramFiles"] = str(tmp_path / "noprogs")
+    env["SystemDrive"] = str(tmp_path / "nodrive")
+
+    rc, out = _run(app, env, tmp_path)
+    assert _wait_for(marker), (
+        "launcher walled a machine whose Python is exactly where setup.cmd puts it"
+        f"\n--- output ---\n{out}")
+    assert marker.read_text().lower() == str(fabricated).lower(), (
+        f"launched something other than the discovered interpreter: {marker.read_text()}")

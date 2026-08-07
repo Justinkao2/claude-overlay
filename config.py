@@ -8,7 +8,7 @@ import json
 import os
 from pathlib import Path
 
-__version__ = "1.15.2"
+__version__ = "1.15.3"
 
 def _env_int(name: str, default: int, min_value: int, max_value: int) -> int:
     try:

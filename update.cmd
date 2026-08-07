@@ -44,12 +44,22 @@ rem is a launch that silently does nothing.
 rem Verify by RUNNING each candidate, not by testing a different file: a Win11 box
 rem without Python still has the Store alias stub in %LOCALAPPDATA%\...\WindowsApps\,
 rem which `where` finds but which only prints "Python was not found".
-set "PYW="
-set "PY="
 rem Every probe goes through `call`: `where` can return a .bat/.cmd shim (pyenv-win and
 rem some conda wrappers install one), and running a batch file from a batch file without
 rem `call` transfers control and never returns -- which would end this script mid-check.
+rem And PATH is not the whole world: setup.cmd installs into
+rem %LOCALAPPDATA%\Programs\Python\Python3xx\ and finds it there by scanning. Refreshing
+rem packages into "whatever is on PATH" while the launcher runs a Python that is not, is
+rem how an update reports success and changes nothing the app will load.
+rem ---- BEGIN find-pythonw (kept identical in Diagnose.cmd and update.cmd) ----
+set "PYW="
 for /f "usebackq delims=" %%i in (`where pythonw 2^>nul`) do if not defined PYW (call "%%i" -c "pass" >nul 2>nul && set "PYW=%%i")
+if not defined PYW for /f "delims=" %%p in ('dir /b /s /a-d /o-n "%LOCALAPPDATA%\Programs\Python\pythonw.exe" 2^>nul') do if not defined PYW (call "%%p" -c "pass" >nul 2>nul && set "PYW=%%p")
+if not defined PYW for /d %%d in ("%ProgramFiles%\Python3*") do if not defined PYW (call "%%d\pythonw.exe" -c "pass" >nul 2>nul && set "PYW=%%d\pythonw.exe")
+if not defined PYW for /d %%d in ("%SystemDrive%\Python3*") do if not defined PYW (call "%%d\pythonw.exe" -c "pass" >nul 2>nul && set "PYW=%%d\pythonw.exe")
+rem ---- END find-pythonw ----
+
+set "PY="
 rem pip's output is invisible under pythonw (no console), so drive pip with the
 rem python.exe beside it WHEN that one also runs - same install, same site-packages,
 rem readable output. When it doesn't, use pythonw itself anyway: upgrading the right
@@ -61,11 +71,14 @@ if defined SIB (call "!SIB!" -c "pass" >nul 2>nul && set PY="!SIB!")
 if not defined PY if defined PYW set PY="!PYW!"
 if not defined PY ( call py -3 -c "pass" >nul 2>nul && set "PY=py -3" )
 if not defined PY ( call python -c "pass" >nul 2>nul && set "PY=python" )
+if not defined PY for /f "delims=" %%p in ('dir /b /s /a-d /o-n "%LOCALAPPDATA%\Programs\Python\python.exe" 2^>nul') do if not defined PY (call "%%p" -c "pass" >nul 2>nul && set PY="%%p")
 
 if not defined PY (
   echo.
   echo [!] No working Python found, so packages were NOT refreshed.
-  echo     Install Python 3.10+ from https://www.python.org/downloads/ then run setup.cmd.
+  echo     The code above IS updated - only the packages were skipped.
+  echo     Double-click setup.cmd: it installs Python when it is missing
+  echo     ^(per-user, no admin^) and then installs the packages too.
 ) else (
   echo.
   echo Refreshing Python packages with !PY! ...

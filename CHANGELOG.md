@@ -3,6 +3,49 @@
 All notable changes to Claude Overlay are documented here.
 This project follows [Semantic Versioning](https://semver.org/).
 
+## [1.15.3] - 2026-08-07
+
+### Fixed
+- **The launcher walled machines that had Python, because it only ever looked at PATH.**
+  `setup.cmd` installs Python into `%LOCALAPPDATA%\Programs\Python\Python3xx\` and then
+  locates it by *scanning that folder* — deliberately, because the PATH inside its own
+  window is stale after an install. The launcher never looked there. So "setup.cmd printed
+  `[OK] The app loads.`" and "PATH has a Python" were two different claims, and a machine
+  could satisfy the first while failing the second forever: setup succeeded, the launcher
+  put up `[X] no Python on PATH ran`, and nothing on screen connected the two.
+  `Start Claude Overlay.cmd`, `Diagnose.cmd` and `update.cmd` now search the folders
+  `setup.cmd` installs into — plus `%ProgramFiles%\Python3*` and `%SystemDrive%\Python3*`
+  — after PATH and before giving up, still verifying each candidate by running it.
+- **`update.cmd` refreshed packages into the wrong interpreter for the same reason.** On a
+  machine whose only Python is off PATH it reported that it could not find one and skipped
+  the upgrade, which is how an install stays un-updatable.
+- **`setup.cmd` no longer offers to install Python over one it already installed.** It now
+  checks its own install folder before prompting.
+
+### Changed
+- **The "no Python" screen now says which of two different problems this is.** It reports
+  the off-PATH install folders as well as `where pythonw` / `python` / `py`, states plainly
+  that paths under `\WindowsApps\` are Windows placeholders rather than an install, and
+  leads with `setup.cmd` — which installs Python itself, per-user, no admin — instead of
+  sending people to python.org first.
+
+### Tests
+- The three `.cmd` scripts' interpreter-discovery block is now compared for byte equality,
+  and asserted to search the folder `setup.cmd` installs into. All three shipped the same
+  v1.15.1 defect independently; nothing was comparing them.
+- `test_every_interpreter_invocation_goes_through_call` now strips `if` / `for` / `(`
+  prefixes and inspects the command underneath, instead of skipping such lines. The old
+  version would not have examined a single probe in the new directory-scanning block.
+- New end-to-end case: PATH holding nothing but dead App-execution-alias stubs, with a
+  working Python where `setup.cmd` puts it, must launch — and must launch *that*
+  interpreter.
+- **`test_copy_btn_puts_text_on_clipboard` was never testing the Copy button.** It
+  synthesised a `<Button-1>`, which Tk discards for a withdrawn widget, so the handler
+  never ran and the assertion compared the expected string against whatever was on the
+  developer's clipboard. It passed only because an earlier run of the same test had left
+  that string there. It now invokes the handler and records the clipboard calls, so it
+  neither depends on nor destroys the machine's clipboard.
+
 ## [1.15.2] - 2026-08-07
 
 ### Fixed

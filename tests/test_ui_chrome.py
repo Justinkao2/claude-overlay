@@ -195,21 +195,40 @@ def test_finish_turn_copy_is_idempotent(overlay):
     )
 
 
-def test_copy_btn_puts_text_on_clipboard(overlay):
-    """Clicking the Copy button stores the raw markdown text on the clipboard."""
+def test_copy_btn_puts_text_on_clipboard(overlay, monkeypatch):
+    """Clicking the Copy button replaces the clipboard with that message's raw markdown.
+
+    Two things this deliberately does NOT do, both learned the hard way:
+
+    It does not synthesise a <Button-1>. Tk discards a synthesised button event aimed at a
+    withdrawn widget, and this whole suite runs withdrawn on purpose -- so the handler
+    never ran, and the old assertion compared the expected string against whatever was on
+    the MACHINE's clipboard. It passed because an earlier run of this same test had left
+    that exact string there, and went red the moment somebody copied something else: it
+    reported on the developer's clipboard and never on the Copy button.
+
+    It also does not write to the real clipboard. Tk hands the Windows clipboard out by
+    delayed rendering, so everything it owns is dropped when the interpreter exits -- a
+    suite that copies for real ends by wiping whatever the developer had copied, and no
+    amount of save/restore inside the test can put it back. Recording the calls tests the
+    same contract (clear, then append THIS message's snapshot) and costs the developer
+    nothing.
+    """
     raw = "**hi** there"
+    calls = []
+    monkeypatch.setattr(overlay.root, "clipboard_clear",
+                        lambda *a, **k: calls.append(("clear",)))
+    monkeypatch.setattr(overlay.root, "clipboard_append",
+                        lambda t, *a, **k: calls.append(("append", t)))
+
     btn = overlay._copy_btn(raw)
     overlay.root.update_idletasks()
-    # Retrieve the on_click callback bound to <Button-1> and call it directly.
-    handlers = btn.bind("<Button-1>")
-    # handlers is a Tcl script string; invoke via the widget's event_generate to trigger it.
-    btn.event_generate("<Button-1>", x=1, y=1)
+    btn._on_click(None)
     overlay.root.update()
-    try:
-        got = overlay.root.clipboard_get()
-    except tk.TclError:
-        pytest.skip("Clipboard not available in this environment")
-    assert got == raw, f"Clipboard expected {raw!r}, got {got!r}"
+
+    assert btn._copied is True, "the Copy handler did not run"
+    assert calls == [("clear",), ("append", raw)], (
+        f"expected the clipboard to be replaced with {raw!r}, got {calls!r}")
 
 
 # ── rename ────────────────────────────────────────────────────────────────────

@@ -13,8 +13,9 @@ echo ============================================================
 echo.
 
 rem --- Resolve the SAME interpreter the launcher uses ---------------------------
-rem "Start Claude Overlay.cmd" runs `pythonw` from PATH, so that is the Python whose
-rem packages matter. Reporting on any other one is how "but I installed it!" happens.
+rem "Start Claude Overlay.cmd" runs whichever `pythonw` it finds first, so that is the
+rem Python whose packages matter. Reporting on any other one is how "but I installed it!"
+rem happens -- so the search order below is a copy of the launcher's, not an equivalent.
 rem Candidates are checked by RUNNING them, in the launcher's own order. pythonw has
 rem no console so it cannot print a version, but its exit code comes back -- and a
 rem redirected `>` still reaches the file, which is why the report below works even
@@ -22,13 +23,26 @@ rem when pythonw is the only interpreter this machine has.
 rem Every probe goes through `call`: `where` can return a .bat/.cmd shim (pyenv-win and
 rem some conda wrappers install one), and running a batch file from a batch file without
 rem `call` transfers control and never returns -- which would end this script mid-check.
+rem PATH is not the whole world either: setup.cmd installs into
+rem %LOCALAPPDATA%\Programs\Python\Python3xx\ and finds it there by scanning, so this
+rem report has to look in the same folders the launcher now looks in. Reporting "no
+rem Python" about a machine that has one is the same failure as refusing to launch on it.
+rem ---- BEGIN find-pythonw (kept identical in Diagnose.cmd and update.cmd) ----
+set "PYW="
+for /f "usebackq delims=" %%i in (`where pythonw 2^>nul`) do if not defined PYW (call "%%i" -c "pass" >nul 2>nul && set "PYW=%%i")
+if not defined PYW for /f "delims=" %%p in ('dir /b /s /a-d /o-n "%LOCALAPPDATA%\Programs\Python\pythonw.exe" 2^>nul') do if not defined PYW (call "%%p" -c "pass" >nul 2>nul && set "PYW=%%p")
+if not defined PYW for /d %%d in ("%ProgramFiles%\Python3*") do if not defined PYW (call "%%d\pythonw.exe" -c "pass" >nul 2>nul && set "PYW=%%d\pythonw.exe")
+if not defined PYW for /d %%d in ("%SystemDrive%\Python3*") do if not defined PYW (call "%%d\pythonw.exe" -c "pass" >nul 2>nul && set "PYW=%%d\pythonw.exe")
+rem ---- END find-pythonw ----
+
 set "PY="
-for /f "usebackq delims=" %%i in (`where pythonw 2^>nul`) do if not defined PY (call "%%i" -c "pass" >nul 2>nul && set PY="%%i")
+if defined PYW set PY="!PYW!"
 if not defined PY ( call pyw -3 -c "pass" >nul 2>nul && set "PY=pyw -3" )
 if not defined PY ( call python -c "pass" >nul 2>nul && set "PY=python" )
 if not defined PY ( call py -3 -c "pass" >nul 2>nul && set "PY=py -3" )
+if not defined PY for /f "delims=" %%p in ('dir /b /s /a-d /o-n "%LOCALAPPDATA%\Programs\Python\python.exe" 2^>nul') do if not defined PY (call "%%p" -c "pass" >nul 2>nul && set PY="%%p")
 if not defined PY (
-  echo [X] Nothing on PATH would run Python. That alone explains the failure.
+  echo [X] Nothing on this PC would run Python. That alone explains the failure.
   echo.
   echo     This is what the machine actually has:
   echo     where pythonw
@@ -37,9 +51,15 @@ if not defined PY (
   where python 2>nul || echo         ^(nothing found^)
   echo     where py
   where py 2>nul || echo         ^(nothing found^)
+  echo     off PATH ^(the folders setup.cmd installs into^)
+  dir /b /s /a-d "%LOCALAPPDATA%\Programs\Python\python*.exe" 2>nul || echo         ^(nothing found^)
   echo.
-  echo     Install Python 3.10+ from https://www.python.org/downloads/
-  echo     ^(tick "Add python.exe to PATH"^), then run setup.cmd.
+  echo     Paths under \WindowsApps\ are Windows placeholders, not a Python install:
+  echo     running one only prints "Python was not found..." and stops.
+  echo.
+  echo     Fix: double-click setup.cmd - it installs Python when it is missing
+  echo     ^(per-user, no admin^). Manual alternative:
+  echo     https://www.python.org/downloads/ ^(tick "Add python.exe to PATH"^).
   echo.
   pause & exit /b 1
 )

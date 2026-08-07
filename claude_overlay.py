@@ -2602,6 +2602,11 @@ class Overlay:
         c.bind("<Enter>", lambda e: show(True))
         c.bind("<Leave>", lambda e: show(False))
         c.bind("<Button-1>", on_click)
+        # Exposed so a test can exercise the real handler. Tk drops a synthesised
+        # <Button-1> on a withdrawn widget, and the whole suite runs withdrawn on
+        # purpose (no flash, no focus steal) -- so a test that "clicks" this button
+        # runs nothing and then asserts against whatever is on the machine's clipboard.
+        c._on_click = on_click
         c.bind("<MouseWheel>", self._fwd_wheel)   # embedded widget must not swallow the scroll
         self._register_zoomable(c, render)
         return c
