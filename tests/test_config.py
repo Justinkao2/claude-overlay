@@ -322,6 +322,30 @@ class TestUserConfig:
         c = load_cfg({"PERMISSION_MODE": "BYPASSPERMISSIONS"})
         assert c.PERMISSION_MODE == "bypassPermissions"
 
+    def test_auto_mode_is_accepted(self, load_cfg):
+        # "auto" is the classifier-reviewed mode. It has to survive the whitelist, because
+        # a REJECTED value falls back to bypassPermissions — the weakest mode there is, and
+        # the exact opposite of what someone who typed "auto" is asking for. That failure
+        # would be silent apart from one startup warning, so pin it.
+        c = load_cfg({"PERMISSION_MODE": "auto"})
+        assert c.PERMISSION_MODE == "auto"
+        assert c.USER_CONFIG_WARNINGS == []
+
+    def test_every_offered_permission_mode_is_one_the_sdk_accepts(self):
+        # Pins the RULE, not a second copy of the list: every mode config.json may set must
+        # be a mode the INSTALLED SDK will really pass through to the CLI. Catches a typo
+        # ("Auto"), a casing slip, and an SDK that later drops a mode — each of which would
+        # otherwise surface as the CLI rejecting the flag and the overlay failing to launch,
+        # which looks nothing like a config problem. requirements.txt floors the SDK rather
+        # than pinning it, so CI runs this against whatever PyPI published today.
+        from typing import get_args
+        from claude_agent_sdk.types import PermissionMode
+
+        offered = set(config._USER_CONFIG_KEYS["PERMISSION_MODE"].allowed)
+        sdk_modes = set(get_args(PermissionMode))
+        assert offered <= sdk_modes, f"config.json offers modes the SDK won't take: {offered - sdk_modes}"
+        assert "auto" in offered      # the reason this test exists; don't let it regress
+
     def test_explicit_env_var_beats_file(self, load_cfg, monkeypatch):
         monkeypatch.setenv("CLAUDE_OVERLAY_SHOT_SCOPE", "window")
         try:

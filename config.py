@@ -323,6 +323,7 @@ def _v_choice(*allowed):
                 if s == a.lower():
                     return a
         return _BAD
+    check.allowed = allowed   # readable by tests, so they can pin the RULE not a copy of the list
     return check
 
 
@@ -362,7 +363,16 @@ _USER_CONFIG_KEYS = {
     # agent
     "WORKING_DIR": _v_dir,
     "MODEL": _v_str,
-    "PERMISSION_MODE": _v_choice("bypassPermissions", "acceptEdits", "default", "plan"),
+    # "auto" is Claude Code's classifier-reviewed mode: a separate model vets each action
+    # before it runs and blocks anything that escalates beyond the request or looks driven
+    # by hostile content the agent read. That last part is why it belongs here — the
+    # overlay feeds the SCREEN to the model, and screen content is written by other people.
+    # Anthropic's own docs say bypassPermissions "offers no protection against prompt
+    # injection" and to use auto mode instead, so a user who wants that trade must be able
+    # to ask for it. Verified on 2026-08-08 that a classifier block is FINAL: it never
+    # reaches worker._allow_tool, so the blanket approve there cannot undo it.
+    # Requires a recent model (Haiku is not supported) and an account with auto mode enabled.
+    "PERMISSION_MODE": _v_choice("bypassPermissions", "acceptEdits", "default", "plan", "auto"),
     "SKILLS": _v_skills,                       # "all" | ["name", …] | null
     "STRICT_MCP_CONFIG": _v_bool,
     "CLI_UPDATE_CHECK": _v_bool,
