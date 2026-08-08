@@ -225,18 +225,36 @@ def test_nothing_installs_a_hardcoded_package_list():
         + "\n".join(offenders))
 
 
-def test_the_sdk_is_pinned_not_floored():
-    """The asymmetry this closes: with a bare `>=` plus `--upgrade`, every colleague gets
-    whatever PyPI published this morning while the author's machine sits on the version it
-    first installed -- so a breaking release hits all of them at once, on a machine that
-    cannot reproduce it. Colleagues are not the canary."""
+def test_ci_is_the_canary_for_new_sdk_releases():
+    """Users get whatever PyPI published this morning, because requirements.txt floors the
+    SDK rather than pinning it -- deliberately: the SDK drives the `claude` CLI, which
+    updates itself, so freezing one half of that pair causes incompatibility instead of
+    preventing it. What makes that safe is that CI installs from the same file on a clean
+    runner and proves the app still loads, so a bad release is caught here first.
+
+    Pinning the SDK would quietly disable this: CI would test a version no new user would
+    ever get. So the pairing is the invariant -- floor plus a CI run against the newest
+    release -- and neither half may be removed on its own."""
+    ci = open(os.path.join(ROOT, ".github", "workflows", "tests.yml"),
+              encoding="utf-8").read()
+    assert "requirements-dev.txt" in ci, "CI no longer installs from the requirements files"
+    assert "preflight.py" in ci, (
+        "CI no longer runs preflight, so nothing proves the app loads against the newest SDK")
+
     lines = [l.strip() for l in read("requirements.txt").splitlines()
              if l.strip() and not l.strip().startswith("#")]
     sdk = next((l for l in lines if l.lower().startswith("claude-agent-sdk")), None)
     assert sdk, "claude-agent-sdk is missing from requirements.txt"
-    assert "==" in sdk, (
-        f"claude-agent-sdk must be pinned, got {sdk!r}. The SDK is pre-1.0 and ships "
-        "several releases a week; upgrading has to be a deliberate, tested act.")
+    assert "==" not in sdk, (
+        f"claude-agent-sdk is pinned ({sdk!r}). That freezes users against a `claude` CLI "
+        "that keeps updating, and it stops CI from ever seeing a new SDK release. If a "
+        "release genuinely broke something, add a ceiling and name the failure in a "
+        "comment in requirements.txt -- do not freeze by default.")
+
+    assert "schedule:" in ci, (
+        "CI only runs on push/PR, so a breaking SDK release would first be discovered by "
+        "whoever runs update.cmd next. The scheduled run is what keeps that from being a "
+        "colleague.")
 
 
 def test_update_can_fall_back_to_pythonw_itself():

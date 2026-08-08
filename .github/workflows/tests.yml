@@ -8,6 +8,14 @@ on:
   push:
     branches: [main]   # PR branches are covered by pull_request; avoids a double run per PR push
   pull_request:
+  # requirements.txt floors claude-agent-sdk rather than pinning it, so a clean runner
+  # installs whatever PyPI published today and preflight proves the app still loads
+  # against it. On push/PR alone that check only fires when someone happens to commit --
+  # which means a breaking SDK release would be discovered by whoever runs update.cmd
+  # next. Weekly, it is discovered here instead.
+  schedule:
+    - cron: "0 6 * * 1"   # Mondays 06:00 UTC
+  workflow_dispatch:
 
 permissions:
   contents: read

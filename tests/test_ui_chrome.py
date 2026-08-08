@@ -224,8 +224,12 @@ def test_copy_btn_puts_text_on_clipboard(overlay, monkeypatch):
     btn = overlay._copy_btn(raw)
     overlay.root.update_idletasks()
     btn._on_click(None)
-    overlay.root.update()
 
+    # No root.update() here, deliberately. on_click schedules after(1200, restore), which
+    # sets _copied back to False so the button stops saying "Copied" -- and pumping the
+    # event loop lets that fire if the call happens to take longer than 1.2 s, which it
+    # occasionally does. Both assertions are on plain Python state, so there is nothing to
+    # pump for, and not pumping removes the race rather than widening the window.
     assert btn._copied is True, "the Copy handler did not run"
     assert calls == [("clear",), ("append", raw)], (
         f"expected the clipboard to be replaced with {raw!r}, got {calls!r}")
