@@ -3,6 +3,53 @@
 All notable changes to Claude Overlay are documented here.
 This project follows [Semantic Versioning](https://semver.org/).
 
+## [1.15.4] - 2026-08-10
+
+### Fixed
+- **The "no Python" screen told you the fix but couldn't do it, and everyone who reached
+  the screen had reached it precisely by the route that hides the fix.** It named
+  `setup.cmd` and stopped — but the screen only ever shows up after double-clicking the
+  launcher, very often from a desktop shortcut, from which this folder (and `setup.cmd`
+  in it) is never visible. `update.cmd`/`update-finish.cmd` don't install Python either,
+  so re-running "Update" could never clear this wall no matter how many times a stuck
+  user tried it. `Start Claude Overlay.cmd` now asks **`Run setup.cmd now? [Y/n]`**
+  (Enter accepts), runs it, and re-scans for Python from scratch — the re-scan matters
+  because the PATH inside this same window stays stale for its whole life, so an install
+  `setup.cmd` just performed is only reachable through the folder scan, not PATH.
+- **`update.cmd` no longer runs `git pull` on the very file `cmd.exe` is still reading.**
+  It now re-execs itself from a temp copy first, and the part that runs after the pull —
+  which needs to know where this release looks for Python — lives in a new
+  `update-finish.cmd` so it's always the freshly-pulled logic, never logic left over from
+  the version being replaced. That driver copy is now resolved by an absolute path handed
+  down from the original launch location, not `%~dp0`, since by the time it runs it's
+  executing out of `%TEMP%`.
+- **`requirements.txt` pinned nothing.** It said `claude-agent-sdk>=0.2.87` while
+  `setup.cmd`/`update.cmd` both installed by spelling the package names out, so the file
+  itself constrained nobody and a `pip install --upgrade` could land 45 releases ahead of
+  what's actually been tested. The floor is now enforced from the one file, every install
+  site reads it, and CI installs the newest available SDK on every run instead of a pin
+  that quietly goes stale — so the CI badge is the live "does the newest SDK still work"
+  signal instead of a number nobody revisits.
+- **`Diagnose.cmd` always overwrote the clipboard with its report**, clobbering whatever
+  a user had copied right before asking for help. `Diagnose.cmd --no-clip` keeps the
+  report on screen without touching the clipboard.
+
+### Added
+- **`"auto"` permission mode.** Routes every action through Claude's own classifier
+  model before it runs, instead of either blocking nothing (`bypassPermissions`) or
+  asking about everything (`default`) — set it via `config.json`'s `PERMISSION_MODE`.
+  Needs a recent model and an account with auto mode enabled.
+
+### Tests
+- New behavioural cases for the setup.cmd offer: it's presented **at most once** per
+  launch, a missing `setup.cmd` is never offered (the manual fallback instructions still
+  print), and answering `n` declines while still leaving those instructions on screen.
+- Fixed a pre-existing flake: the test harness's fabricated "app started" marker was read
+  the instant the file *existed*, before the stub app had actually written to it, so a
+  timing-sensitive run could report the wrong interpreter started. Now waits for the file
+  to be non-empty.
+- 521 tests pass.
+
 ## [1.15.3] - 2026-08-07
 
 ### Fixed
