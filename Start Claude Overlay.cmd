@@ -26,6 +26,15 @@ rem never comes back. That would end this launcher mid-check: no window, no mess
 rem nothing at all, which is the very symptom it exists to prevent.
 rem ---------------------------------------------------------------------------------
 
+rem :findpython is a re-entry point, not decoration. When the give-up path below runs
+rem setup.cmd and setup installs Python, the PATH in THIS window is already stale and
+rem stays stale for the life of the window -- so the only way to see the interpreter that
+rem was just installed is to ask again, and to reach it through the folder scan rather
+rem than through PATH. Jumping back here re-runs every probe from scratch (`set "PYW="`
+rem clears the state), which is also why the answer comes from re-measuring rather than
+rem from whatever setup.cmd reported about itself.
+:findpython
+
 rem ---- BEGIN find-pythonw (kept identical in Diagnose.cmd and update.cmd) ----
 set "PYW="
 for /f "usebackq delims=" %%i in (`where pythonw 2^>nul`) do if not defined PYW (call "%%i" -c "pass" >nul 2>nul && set "PYW=%%i")
@@ -100,6 +109,44 @@ echo   If every path above is under \WindowsApps\, this PC has no Python at all:
 echo   those are Windows placeholders, not an install. Running one only prints
 echo   "Python was not found..." and stops.
 echo.
+
+rem Offer to RUN the fix instead of naming it. "Double-click setup.cmd" is a dead end for
+rem exactly the people who reach this screen: someone who starts the app from the Desktop
+rem shortcut or the Start menu has never seen this folder, and the first thing anybody
+rem double-clicks is the launcher, never setup. So the wall was hit by the users least
+rem able to act on it, and the report it prints is worth nothing to them.
+rem
+rem `if exist` guard: a user who copied only this one file out of the ZIP has no setup.cmd
+rem to run, and offering to run something that is not there is worse than the old message.
+rem SETUPDONE guard: a setup that did NOT fix it must end at the manual instructions, not
+rem loop back to the same question forever.
+rem
+rem Not inside parentheses on purpose. cmd expands %VAR% for a whole parenthesised block
+rem when it PARSES the block, so a value read by `set /p` inside one is read back stale --
+rem the same trap setup.cmd documents at its own prompt.
+if defined SETUPDONE goto manualfix
+if not exist "%~dp0setup.cmd" goto manualfix
+echo   setup.cmd fixes this: it installs Python for you ^(per-user, no admin needed^)
+echo   and finishes the rest of the install in the same run.
+echo.
+set "DOSETUP=Y"
+set /p DOSETUP="  Run setup.cmd now? [Y/n] "
+rem First character only, so "no" is a refusal too and not an unrecognised answer that
+rem gets read as consent. Enter leaves DOSETUP as the default Y.
+if /i "!DOSETUP:~0,1!"=="n" goto manualfix
+set "SETUPDONE=1"
+echo.
+rem Through a fresh cmd, because THIS window has delayed expansion on and setup.cmd does
+rem not: with it on, cmd eats the lone `!` in setup's own `[!]` notices, silently
+rem rewriting the messages a stuck user is relying on. `cmd /c call "..."` (rather than
+rem `start`) also keeps the quotes -- the command does not begin with one -- and returns
+rem control here when setup is done.
+cmd /c call "%~dp0setup.cmd"
+echo.
+echo Re-checking for Python ...
+goto findpython
+
+:manualfix
 echo   Fix: double-click setup.cmd. It installs Python for you when it is missing
 echo        ^(per-user, no admin needed^) and finishes the rest in the same run.
 echo        Manual alternative: https://www.python.org/downloads/

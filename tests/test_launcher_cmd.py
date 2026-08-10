@@ -15,6 +15,14 @@ So the invariants here are behavioural -- the launcher is actually run against f
 PATHs -- rather than assertions about its text. The two that matter are the two that
 broke: *the launcher must not dead-end while a usable interpreter exists*, on PATH or in
 the folder setup.cmd installs into. Wording changes freely; those properties must not.
+
+A third one was added after a user with genuinely no Python got stuck anyway: when the
+launcher is right that nothing will run, it must OFFER TO RUN setup.cmd rather than print
+a wall telling the reader to go double-click a different file. Everyone who reaches that
+screen reached it by double-clicking the launcher (often via a Desktop shortcut, from
+which the folder is never visible), so "the fix is one folder away" is not a fix. That
+offer has its own failure modes -- an infinite loop, and offering a setup.cmd that was
+never unzipped -- so it is pinned from all three sides below.
 """
 import glob
 import os
@@ -332,10 +340,15 @@ def _sandbox(tmp_path, shim_dir, shim_body=None):
 _EDR_REFUSAL = "Access is denied."
 
 
-def _run(app, env, tmp_path):
+def _run(app, env, tmp_path, answer=None):
     """Collect output through a FILE, not a pipe: the launcher's `start` hands its stdout
     handle to the process it spawns, so waiting for pipe EOF would mean waiting for the
     overlay itself to exit.
+
+    `answer` is typed at whatever the launcher prompts for. Leaving it None is a distinct
+    case rather than "no answer": with stdin at EOF cmd's `set /p` leaves the variable
+    holding the default it was given, which is the same path a real user takes by
+    pressing Enter. Both are worth exercising, and only one of them can be typed.
 
     The retry is for endpoint protection, not for flaky assertions. Some managed Windows
     machines refuse to execute a .cmd that was written seconds ago until a scan finishes,
@@ -343,11 +356,21 @@ def _run(app, env, tmp_path):
     unambiguous -- the launcher never produces it -- so retrying on it cannot paper over a
     real failure, and if it never clears the test FAILS rather than skipping."""
     log = tmp_path / "out.txt"
+    keyed = tmp_path / "stdin.txt"
+    if answer is not None:
+        keyed.write_text(answer, encoding="ascii")
     for attempt in range(6):
         with open(log, "w", encoding="utf-8", errors="replace") as fh:
-            p = subprocess.run(["cmd", "/c", "call", str(app / "Start Claude Overlay.cmd")],
-                               cwd=str(app), env=env, stdin=subprocess.DEVNULL,
-                               stdout=fh, stderr=subprocess.STDOUT, timeout=90)
+            stdin = open(str(keyed), "rb") if answer is not None else None
+            try:
+                p = subprocess.run(
+                    ["cmd", "/c", "call", str(app / "Start Claude Overlay.cmd")],
+                    cwd=str(app), env=env,
+                    stdin=stdin if stdin is not None else subprocess.DEVNULL,
+                    stdout=fh, stderr=subprocess.STDOUT, timeout=90)
+            finally:
+                if stdin is not None:
+                    stdin.close()
         out = log.read_text(encoding="utf-8", errors="replace")
         if out.strip() != _EDR_REFUSAL:
             return p.returncode, out
@@ -356,10 +379,42 @@ def _run(app, env, tmp_path):
                 f"({_EDR_REFUSAL!r}) -- the launcher itself was never reached")
 
 
+def _pythonless(tmp_path):
+    """A sandbox where nothing anywhere will run Python -- the state a fresh Windows 11
+    box is in, where `where python` still answers with the App-execution-alias stub."""
+    app, marker, env = _sandbox(tmp_path, "empty", "@exit /b 9009\n")
+    os.remove(tmp_path / "empty" / "pythonw.bat")
+    return app, marker, env
+
+
+# The line the launcher prints just before it asks. Asserted instead of the `set /p`
+# prompt itself, which is a plain `echo` either way and does not depend on how cmd
+# routes prompt text when stdout is redirected.
+OFFER = "setup.cmd fixes this"
+
+
+def _stub_setup(app, tmp_path, env):
+    """A setup.cmd that records that it ran and nothing else. A test cannot install
+    Python; what has to be pinned is that the launcher REACHES setup instead of telling
+    the user to go and find it."""
+    ran = tmp_path / "SETUP_RAN.txt"
+    (app / "setup.cmd").write_text(
+        "@echo off\n"
+        "echo stub setup ran\n"
+        '>"%OVERLAY_SETUP_MARKER%" echo ran\n', encoding="ascii")
+    env["OVERLAY_SETUP_MARKER"] = str(ran)
+    return ran
+
+
 def _wait_for(marker, seconds=20):
+    """Non-empty, not merely present. The stub app creates the marker and writes to it as
+    two separate steps, so "the file exists" is true for a moment before the interpreter
+    path is in it -- and a caller that then reads the file gets "" and reports that the
+    launcher started the wrong Python. That fired once in ~20 runs and accused the
+    launcher of a bug it does not have, which is worse than no test."""
     deadline = time.time() + seconds
     while time.time() < deadline:
-        if marker.exists():
+        if marker.exists() and marker.stat().st_size > 0:
             return True
         time.sleep(0.1)
     return False
@@ -392,8 +447,7 @@ def test_the_app_execution_alias_stub_is_still_refused(tmp_path):
 
 @windows_only
 def test_no_python_at_all_reports_what_it_looked_at(tmp_path):
-    app, marker, env = _sandbox(tmp_path, "empty", "@exit /b 9009\n")
-    os.remove(tmp_path / "empty" / "pythonw.bat")
+    app, marker, env = _pythonless(tmp_path)
     rc, out = _run(app, env, tmp_path)
     assert not _wait_for(marker, seconds=3)
     assert "Could not start Claude Overlay" in out
@@ -401,6 +455,57 @@ def test_no_python_at_all_reports_what_it_looked_at(tmp_path):
     # "No Python on PATH" and "no Python on this PC" need different fixes, and the report
     # is the only thing that separates them for whoever is reading it.
     assert "OFF PATH" in out, f"report cannot distinguish PATH from install\n{out}"
+
+
+@windows_only
+def test_the_launcher_runs_setup_for_you_rather_than_naming_it(tmp_path):
+    """The dead end, pinned. A machine with no Python is setup.cmd's job, and the person
+    looking at this screen got here by double-clicking the launcher -- very often from a
+    Desktop shortcut, from which setup.cmd is not visible and not findable. Printing its
+    name is not a fix for them; running it is.
+
+    Pressing Enter accepts, which is what an empty stdin reproduces here.
+
+    The `== 1` is the loop guard, and it is the reason this is not just a smoke test:
+    the launcher re-runs its whole search after setup so it can find an interpreter that
+    PATH will never mention, and a re-search that fails lands back on this very screen.
+    Without a latch that is an infinite offer, and the stub setup used here fixes
+    nothing -- so this is exactly the shape that would spin."""
+    app, marker, env = _pythonless(tmp_path)
+    ran = _stub_setup(app, tmp_path, env)
+    rc, out = _run(app, env, tmp_path)
+    assert ran.exists(), (
+        "the launcher named setup.cmd but never ran it, so a user who cannot find that "
+        f"file is still stuck\n--- output ---\n{out}")
+    assert out.count(OFFER) == 1, (
+        f"setup was offered {out.count(OFFER)} times; it must be offered at most once, "
+        f"or a setup that does not fix the problem loops forever\n--- output ---\n{out}")
+
+
+@windows_only
+def test_the_launcher_does_not_offer_a_setup_it_does_not_have(tmp_path):
+    """Someone who copied one file out of the ZIP has no setup.cmd. Offering to run it
+    would replace a useless message with a broken one, so the offer is conditional on the
+    file existing -- and the manual instructions have to survive that branch."""
+    app, marker, env = _pythonless(tmp_path)
+    assert not (app / "setup.cmd").exists(), "test premise: this sandbox has no setup.cmd"
+    rc, out = _run(app, env, tmp_path)
+    assert OFFER not in out, f"offered to run a setup.cmd that is not there\n{out}"
+    assert "Manual alternative" in out, (
+        f"dropped the instructions along with the offer\n--- output ---\n{out}")
+
+
+@windows_only
+def test_declining_the_offer_leaves_the_manual_instructions(tmp_path):
+    """"n" has to mean no. It also has to still answer the question the user came with,
+    so declining lands on the same instructions the offer replaced rather than on
+    nothing."""
+    app, marker, env = _pythonless(tmp_path)
+    ran = _stub_setup(app, tmp_path, env)
+    rc, out = _run(app, env, tmp_path, answer="n\n")
+    assert not ran.exists(), f"ran setup.cmd after the user declined\n--- output ---\n{out}"
+    assert "Manual alternative" in out, (
+        f"declining left the user with no instructions at all\n--- output ---\n{out}")
 
 
 def _fabricate_offpath_python(tmp_path):
