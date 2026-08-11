@@ -347,6 +347,28 @@ class TestMakeOptions:
         assert hasattr(opts, "disallowed_tools")
         assert "AskUserQuestion" in (opts.disallowed_tools or [])
 
+    def test_no_mcp_servers_by_default(self, monkeypatch):
+        # THE no-op guarantee for everyone who hasn't opted in. config.MCP_SERVERS ships
+        # empty, and an empty value must leave the options exactly as they were before the
+        # feature existed — no server declared, nothing dialled, no "needs authentication"
+        # entry. conftest already points the config override at a path that can't exist, so
+        # this is the real default; the monkeypatch just makes the test independent of
+        # whatever the machine running it has in its own config.json.
+        monkeypatch.setattr(worker_module, "MCP_SERVERS", {})
+        opts = make_worker()._make_options()
+        assert not getattr(opts, "mcp_servers", None), (
+            "an empty MCP_SERVERS must not put anything in mcp_servers — a released build "
+            "would otherwise make every user's overlay connect to a server they never set"
+        )
+
+    def test_declared_mcp_servers_are_passed_through(self, monkeypatch):
+        # And when opted in, the dict reaches the SDK unchanged (same shape the CLI takes),
+        # because under strict_mcp_config this is the ONLY route an MCP server has in.
+        servers = {"notion": {"type": "http", "url": "https://mcp.notion.com/mcp"}}
+        monkeypatch.setattr(worker_module, "MCP_SERVERS", servers)
+        opts = make_worker()._make_options()
+        assert opts.mcp_servers == servers
+
 
 # ---------------------------------------------------------------------------
 # 5b. _allow_tool (permission callback / interactive-tool guard)
