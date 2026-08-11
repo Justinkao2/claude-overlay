@@ -314,19 +314,29 @@ class ClaudeWorker(threading.Thread):
             # Relaunch INTO a previous conversation: the launch-time Resume button, or
             # a reconnect carrying the live session across a dead transport (_reconnect).
             opts["resume"] = self._resume_session_id
+        if MCP_SERVERS:
+            # The servers the overlay declares for ITSELF (config.MCP_SERVERS, empty by
+            # default). Under strict_mcp_config below this is the ONLY way an MCP server
+            # reaches the overlay — which is the point: one wanted server (Notion) instead
+            # of inheriting all sixty. Remote ones must already be authenticated in the CLI
+            # (`claude mcp login <name>`); we pass config, never credentials.
+            opts["mcp_servers"] = dict(MCP_SERVERS)
         if STRICT_MCP_CONFIG:
-            # Use ONLY the (empty) MCP servers defined here, ignoring the user's filesystem
-            # config. Without this the spawned CLI loads every MCP server from ~/.claude.json
-            # and injects all their tool schemas — measured at 72K tokens (36% of Haiku's
-            # 200K window) on one machine with many MCP servers, gone before the first
-            # message. setting_sources
+            # Use ONLY the MCP servers defined here (usually none), ignoring the user's
+            # filesystem config. Without this the spawned CLI loads every MCP server from
+            # ~/.claude.json and injects all their tool schemas — measured at 72K tokens
+            # (36% of Haiku's 200K window) on one machine with many MCP servers, gone
+            # before the first message. setting_sources
             # alone does NOT stop this; the CLI loads MCP servers via a separate path.
             opts["strict_mcp_config"] = True
         # Some kwargs (max_buffer_size, can_use_tool, strict_mcp_config) only exist on newer
         # SDKs. Strip any the installed SDK rejects, one at a time, so an older install still
         # loads (with reduced features) instead of failing to construct options at all.
+        # mcp_servers is listed AFTER strict_mcp_config on purpose: if an old SDK forces us to
+        # drop strict, the declared servers are still worth keeping (they'd load anyway).
         droppable = ["strict_mcp_config", "max_buffer_size", "can_use_tool",
-                     "include_partial_messages", "skills", "disallowed_tools", "resume"]
+                     "include_partial_messages", "skills", "disallowed_tools", "resume",
+                     "mcp_servers"]
         self._last_dropped = []
         while True:
             try:

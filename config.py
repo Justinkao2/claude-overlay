@@ -78,6 +78,19 @@ DISALLOWED_TOOLS = ["AskUserQuestion"]
 # servers/connectors (incl. claude.ai Microsoft 365) for calendar/Outlook etc.
 STRICT_MCP_CONFIG = _env_bool("CLAUDE_OVERLAY_STRICT_MCP", True)
 
+# ...but "inherit nothing" is all-or-nothing, and sometimes you want exactly ONE server
+# (say Notion) without dragging in the other sixty. These are declared FOR the overlay, so
+# they load even under STRICT_MCP_CONFIG. Same shape as ~/.claude.json's "mcpServers":
+#   {"notion": {"type": "http", "url": "https://mcp.notion.com/mcp"}}
+#   {"my-tool": {"command": "npx", "args": ["-y", "some-mcp"], "env": {"K": "v"}}}
+# Empty by DEFAULT on purpose: a released build must not make everyone's overlay dial a
+# third party or show a "needs authentication" server nobody asked for. Set it per machine
+# in config.json (see USER_CONFIG_FILE below). Remote servers must already be authenticated
+# in the CLI (`claude mcp login <name>`); the overlay does no OAuth of its own. Costs context
+# — each server's tool schemas land in the window, which is the very thing STRICT_MCP_CONFIG
+# exists to avoid, so add servers you actually use.
+MCP_SERVERS: dict = {}
+
 SKILLS = "all"                    # which Agent SDK skills to enable in the overlay. Default None
                                   # means the overlay discovers NO skills (the SDK only wires up
                                   # skill discovery when this is set). A list enables ONLY those
@@ -347,6 +360,18 @@ def _v_skills(v):
     return v if v is None or v == "all" else _v_str_list(v)
 
 
+def _v_mcp_servers(v):
+    """MCP_SERVERS: {name: {...}} exactly as ~/.claude.json spells it. Validated only as
+    far as "a dict of non-blank names to dicts" — the CLI owns the per-transport schema and
+    would reject a bad one far more precisely than a guess here. {} is legal: it means the
+    committed default (no servers), so a user can switch the feature back off in the file."""
+    if not isinstance(v, dict):
+        return _BAD
+    if not all(isinstance(k, str) and k.strip() and isinstance(s, dict) for k, s in v.items()):
+        return _BAD
+    return dict(v)
+
+
 def _v_dir(v):
     """WORKING_DIR: expand ~ and %VARS%, and require the directory to EXIST — the CLI
     is spawned with this as its cwd, and a bad cwd fails far less legibly than this."""
@@ -375,6 +400,7 @@ _USER_CONFIG_KEYS = {
     "PERMISSION_MODE": _v_choice("bypassPermissions", "acceptEdits", "default", "plan", "auto"),
     "SKILLS": _v_skills,                       # "all" | ["name", …] | null
     "STRICT_MCP_CONFIG": _v_bool,
+    "MCP_SERVERS": _v_mcp_servers,             # {name: {...}} — loads even under strict
     "CLI_UPDATE_CHECK": _v_bool,
     # capture
     "AUTO_SCREENSHOT_DEFAULT": _v_bool,

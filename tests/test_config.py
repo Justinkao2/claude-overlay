@@ -220,6 +220,56 @@ class TestStrictMcpConfig:
         assert isinstance(config.STRICT_MCP_CONFIG, bool)
 
 
+class TestMcpServers:
+    """Tests for config.MCP_SERVERS and its validator.
+
+    MCP_SERVERS is the escape hatch from STRICT_MCP_CONFIG's all-or-nothing: it declares
+    specific servers FOR the overlay, so they load while the user's other ~60 stay out.
+    The committed default must stay EMPTY — a release that shipped a server would have
+    every user's overlay dialling a third party they never configured.
+    """
+
+    def test_default_is_empty(self):
+        assert config.MCP_SERVERS == {}, (
+            "the committed MCP_SERVERS default must be empty — shipping a server would "
+            "make every user's overlay connect to it. Set it per machine in config.json."
+        )
+
+    def test_is_dict(self):
+        assert isinstance(config.MCP_SERVERS, dict)
+
+    def test_validator_accepts_remote_and_stdio_shapes(self):
+        v = config._v_mcp_servers
+        remote = {"notion": {"type": "http", "url": "https://mcp.notion.com/mcp"}}
+        stdio = {"my-tool": {"command": "npx", "args": ["-y", "some-mcp"]}}
+        assert v(remote) == remote
+        assert v(stdio) == stdio
+        assert v({}) == {}          # legal: switches the feature back off from the file
+
+    def test_validator_returns_a_copy(self):
+        # The schema hands its result straight to a module global; sharing the caller's
+        # dict would let later mutation of the parsed JSON reach into config.
+        src = {"notion": {"type": "http", "url": "https://mcp.notion.com/mcp"}}
+        assert config._v_mcp_servers(src) is not src
+
+    @pytest.mark.parametrize("bad", [
+        None,                                    # JSON null
+        [],                                      # a list, not an object
+        "notion",                                # a bare string
+        {"notion": "https://mcp.notion.com/mcp"},  # value must be an object, not a URL
+        {"": {"type": "http"}},                  # blank server name
+        {"  ": {"type": "http"}},                # whitespace-only name
+        {1: {"type": "http"}},                   # non-string key
+    ])
+    def test_validator_rejects_bad_shapes(self, bad):
+        assert config._v_mcp_servers(bad) is config._BAD
+
+    def test_key_is_wired_into_the_settings_schema(self):
+        # Without this entry the key is an "unknown key" and gets skipped with a warning,
+        # so config.json could never turn the feature on.
+        assert config._USER_CONFIG_KEYS["MCP_SERVERS"] is config._v_mcp_servers
+
+
 # ---------------------------------------------------------------------------
 # 6. SHOT_JPEG_QUALITY and SYSTEM_APPEND
 # ---------------------------------------------------------------------------
