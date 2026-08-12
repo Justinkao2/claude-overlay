@@ -3,6 +3,86 @@
 All notable changes to Claude Overlay are documented here.
 This project follows [Semantic Versioning](https://semver.org/).
 
+## [1.16.0] - 2026-08-12
+
+### Added
+- **Python now installs on locked-down work machines, where both previous routes were
+  blocked.** Reported from a managed corporate PC where `setup.cmd` could not install Python
+  at all — and where neither existing route could ever have worked: an endpoint-security
+  product (BeyondTrust/Avecto) refuses any Python-Software-Foundation-signed `python.exe`,
+  and because the rule matches the **signature** rather than the filename it covers the
+  python.org installer, the Microsoft Store build *and* the official embeddable zip alike;
+  separately, a proxy (Zscaler) answers `403` for `.exe` downloads from python.org, so the
+  installer could not even be fetched. There is now a third route:
+  [uv](https://github.com/astral-sh/uv), whose own executable arrives inside a
+  GitHub-release `.zip` and whose CPython build is not PSF-signed. Verified end to end:
+  Python 3.12.13 with tkinter, and `pip` installs into it.
+- **`offline/` — two routes that need no working download at all.** A refused download is
+  treated as ordinary rather than exceptional, because this policy is per-user/per-group:
+  measured on two machines in the same company, the *same* python.org URL returned `403` on
+  one and `200` on the other. So any of these downloads can be refused on somebody's
+  machine — including uv's own, whose URL redirects to `release-assets.githubusercontent.com`,
+  a different host a proxy can block separately from `github.com`. Drop `uv-*.zip` into
+  `offline/` (staged from any machine that *can* reach GitHub) and it is used **before** the
+  network is tried; or set `UV_PYTHON_INSTALL_MIRROR`, which is honoured and never
+  overwritten, so an administrator can hand it to a whole fleet. Failing that, any Python
+  3.10+ folder dropped into `%LOCALAPPDATA%\Programs\Python\` is enough — every script here
+  *scans* that folder and uses whatever runs, regardless of how it got there. See
+  [`offline/README.md`](offline/README.md).
+- **The "could not install Python" screen now names a reason per route.** "403 on the `.zip`"
+  is something you can hand to IT; "install failed" is not. It also leads with the two
+  no-download routes instead of pointing you back at python.org — which, on an affected
+  machine, is the exact download that was just refused.
+- **`MCP_SERVERS`** — the overlay can be given specific MCP servers (same shape as
+  `~/.claude.json`'s `mcpServers`) instead of the previous all-or-nothing choice between
+  every server in your config and none. Defaults to `{}`, so nothing changes unless you set
+  it. `STRICT_MCP_CONFIG` keeps doing its job around it, which means the servers you declare
+  are the *only* ones present — the lean context stays lean.
+
+### Changed
+- **`update.cmd` is now the only file you double-click to update; `update-finish.cmd` is
+  gone.** It existed for a real reason — `git pull` replaces `update.cmd` while `cmd.exe` is
+  still reading it by byte offset, and the post-pull half has to be the code that was just
+  *downloaded* — and that guarantee is unchanged: the updater still re-execs from `%TEMP%`
+  (where git cannot touch the executing bytes) and still crosses into the freshly pulled
+  file for the second half, now via a mode flag rather than a second filename.
+- **`update.cmd` fixes a missing Python instead of telling you to go and find `setup.cmd`.**
+  It offers to run it (Enter accepts), then re-scans from scratch — the re-scan matters
+  because `PATH` inside that window stays stale for its whole life, so an interpreter just
+  installed is only reachable through the folder scan. `update.cmd` never installed Python
+  itself, so "run Update again" could not clear that wall however many times you tried it,
+  and every route out ended at a file that a Desktop-shortcut user has never seen.
+
+### Fixed
+- **An update that skipped the package refresh no longer reports success.** The old post-pull
+  half printed its warning and then carried on to `[OK] Updated` and exit 0, so an update
+  that left the app unable to start looked exactly like one that worked. It now exits
+  non-zero and says plainly that the pull itself did succeed.
+- **Notices are no longer silently emptied of their `[!]` marker.** These scripts run with
+  delayed expansion on, where a lone `!` in an `echo` is deleted — `echo [!] x` printed
+  `[] x` — so every `[!]` notice the old post-pull half shipped was read as `[]` by every
+  user.
+- Python discovery in `install-python.ps1` searched for `Python3*\python.exe`, which no
+  longer matches every layout it may find, and did not skip `Lib\venv\scripts\nt` — those
+  are venv *template* launchers rather than usable interpreters, and one was measured taking
+  17 seconds to answer a `--version` probe.
+
+### Upgrading from 1.15.4
+The `update.cmd` shipped in 1.15.4 pulls this release and then looks for the
+`update-finish.cmd` that the pull has just deleted, so **that one run stops with "the
+packages were NOT refreshed"**. The code is already updated at that point — just
+**double-click `update.cmd` again** and it completes normally. Every later update is a single
+double-click.
+
+### Tests
+- 555 pass. New: the merged updater's mode dispatch is pinned *before* the `%TEMP%` re-exec
+  (the wrong order is an infinite `git pull` loop), a skipped package refresh can never claim
+  success, no notice in a delayed-expansion script may hide a bare `!`, and `install-python.ps1`
+  must keep `curl.exe` optional, avoid curl flags newer than the 7.55 that Windows 10 1803
+  ships, judge a download by its status rather than by the output file existing, select the
+  right uv build for all three Windows architectures, probe for `--no-bin` before passing it,
+  and try `offline/` before the network.
+
 ## [1.15.4] - 2026-08-10
 
 ### Fixed
