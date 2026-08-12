@@ -3,6 +3,75 @@
 All notable changes to Claude Overlay are documented here.
 This project follows [Semantic Versioning](https://semver.org/).
 
+## [1.16.1] - 2026-08-12
+
+Hardening for the Python-install path that 1.16.0 introduced, from a post-release
+review. No new features; if 1.16.0 installed Python for you, nothing changes.
+
+### Fixed
+- **The uv `.zip` extraction fallback crashed on every Windows PowerShell 5.1 machine —
+  which is exactly where it runs.** When `Expand-Archive` is missing or blocked, the
+  fallback called a 3-argument `ExtractToDirectory` overload that exists on .NET Core
+  but not on .NET Framework, so under the stock PowerShell of a trimmed or locked-down
+  box it always threw, and a successfully downloaded (or pre-staged) uv was never
+  extracted. It now extracts entry by entry through an API present on both runtimes.
+- **A corrupt pre-staged `offline\uv-*.zip` no longer kills the whole route.** A
+  truncated zip (say, an interrupted USB copy) used to abort before the network was
+  tried; it now falls through to the download, and the give-up report keeps the fact
+  that a staged archive was tried and was bad — instead of overwriting it with the
+  download story, which sent people re-running against the same broken file.
+- **A broken `uv.exe` can no longer short-circuit the working alternatives.** A found
+  uv (on `PATH` or in `Programs\uv`, e.g. left truncated by an earlier failed extract)
+  was trusted on sight, skipping both the staged zip and the download; it is now probed
+  with `uv --version` first, so the documented recovery path — stage a zip, re-run —
+  actually recovers.
+- **Download failures now name what actually happened.** The per-route report printed
+  things like `HTTP curl exit 6` for a DNS failure, and a transfer that broke mid-body
+  was reported as `HTTP 200` — sending users to IT with a proxy ticket for a download
+  that merely disconnected. Codes are now self-describing: `HTTP 403`,
+  `curl exit 6, no HTTP status`, `curl exit 18 after HTTP 200`.
+- **`-DryRun` no longer requires curl.** Its connectivity probe called `curl.exe`
+  unguarded — against the file's own "curl preferred, never required" rule — and could
+  hang indefinitely on a black-holing proxy; it now falls back to `Invoke-WebRequest`
+  and carries a 25-second timeout either way, and also reports whether a staged
+  `offline\` zip or a `UV_PYTHON_INSTALL_MIRROR` would be picked up.
+- **A Python dropped into `%LOCALAPPDATA%\Programs\Python\` by hand now works with
+  pip.** `offline/README.md`'s route B blesses exactly that, but python-build-standalone
+  trees ship `Lib\EXTERNALLY-MANAGED`, which makes every pip run refuse the interpreter.
+  1.16.0 stripped the marker only when uv itself installed the Python; `setup.cmd` and
+  `update.cmd` now sweep it from that folder (and only that folder — a system or conda
+  Python elsewhere keeps its marker) before every package install.
+- **`setup.cmd`'s post-install re-scan probes what it finds.** The pre-install scan
+  verified every candidate with `--version`; the re-scan after an install took the first
+  `python.exe` on faith, so a half-installed or policy-blocked interpreter could be
+  handed to pip and fail two screens later instead of being reported where it was found.
+- **`update.cmd` cannot inherit its way past the setup offer.** The "run setup.cmd
+  now?" latch was read before it was ever set, so a `SETUPDONE` variable inherited from
+  the calling environment silently skipped the offer — the exact dead end that screen
+  was rewritten to remove. It is now cleared on entry.
+- **The update-path give-up screen points at the no-download routes.** It still said
+  only "python.org" — which, on the blocked machines that reach it, is the download that
+  was just refused; it now also names `offline\README.md`, matching every other screen
+  this release family touched.
+- **`offline/README.md` covers 32-bit Windows.** The pre-stage table listed only
+  `x86_64` and `aarch64` zips, while the installer selects `uv-i686-pc-windows-msvc.zip`
+  on 32-bit Windows — a reader following the table staged a build that could not run,
+  and the failure looked like a broken archive rather than a wrong architecture. Added
+  the row and an architecture-match warning.
+
+### Tests
+- Still 555, but three of them can now actually fail: the `install-python.ps1` fixture
+  strips block-comment bodies (a guarantee stated in the file header could satisfy a
+  test about the code), the offline-before-network test anchors on the call site instead
+  of a function definition it could never miss, and the bare-`!` tripwire no longer
+  skips a whole line because one legitimate `!VAR!` appears on it — and now reads
+  `set /p` prompts too, which delayed expansion mangles the same way.
+- The launcher tests that spawn a freshly written stub `setup.cmd` now warm it until the
+  OS agrees to run it: managed machines' endpoint protection refuses seconds-old `.cmd`
+  files, and that refusal landed *inside* the launcher's output where the existing retry
+  could not see it, intermittently failing the suite on exactly the machines the
+  launcher is built for.
+
 ## [1.16.0] - 2026-08-12
 
 ### Added
