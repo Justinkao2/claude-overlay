@@ -39,8 +39,10 @@ call py -3 --version >nul 2>nul && set "PY=py -3"
 if not defined PY ( call python --version >nul 2>nul && set "PY=python" )
 if defined PY goto pyfound
 rem (recurse from Programs\Python for python.exe -- a wildcard MID-path like Python3*\python.exe
-rem  is NOT matched by `dir /s`, so search the base dir for the filename instead)
-for /f "delims=" %%p in ('dir /b /s /a-d /o-n "%LOCALAPPDATA%\Programs\Python\python.exe" 2^>nul') do if not defined PY set PY="%%p"
+rem  is NOT matched by `dir /s`, so search the base dir for the filename instead. Probe each
+rem  hit like the pre-install scan above does: a half-installed or policy-blocked python.exe
+rem  taken on faith here would feed a dead %PY% to pip and preflight below.)
+for /f "delims=" %%p in ('dir /b /s /a-d /o-n "%LOCALAPPDATA%\Programs\Python\python.exe" 2^>nul') do if not defined PY (call "%%p" --version >nul 2>nul && set PY="%%p")
 if defined PY goto pyfound
 
 :pymanual
@@ -135,6 +137,13 @@ if not exist "%~dp0requirements.txt" (
   echo     Re-download the ZIP and unzip ALL of it over this folder.
   pause & exit /b 1
 )
+rem python-build-standalone trees ship Lib\EXTERNALLY-MANAGED, and while it is present pip
+rem refuses the interpreter with "externally-managed-environment". install-python.ps1
+rem strips it at uv-install time, but a Python dropped in BY HAND still carries it -- and
+rem offline\README.md route B blesses exactly that. Re-establish the invariant here, every
+rem run, scoped to the folder the overlay owns (a system/conda interpreter elsewhere on
+rem PATH keeps its marker) -- same sweep install-python.ps1 performs after a uv install.
+for /f "delims=" %%e in ('dir /b /s /a-d "%LOCALAPPDATA%\Programs\Python\EXTERNALLY-MANAGED" 2^>nul') do del /f /q "%%e" >nul 2>nul
 echo Installing the Python packages listed in requirements.txt ...
 echo (Any "installed in ... which is not on PATH" warnings below are harmless.)
 call %PY% -m pip install --upgrade -r "%~dp0requirements.txt"

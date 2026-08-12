@@ -118,6 +118,10 @@ rem The old update-finish.cmd shipped several `[!]` notices that every user saw 
 rem no notice here contains a bare `!`.
 :finish
 cd /d "%~dp0"
+rem Fresh state, measured here: a SETUPDONE inherited from the calling environment would
+rem otherwise skip the run-setup offer below on the very first pass -- same rationale as
+rem the `set "PYW="` inside the find block.
+set "SETUPDONE="
 
 rem --- refresh Python packages ------------------------------------------------
 rem Into the interpreter the LAUNCHER uses, not whichever one `py -3` happens to pick.
@@ -217,6 +221,8 @@ echo   Fix: double-click setup.cmd. It installs Python when it is missing
 echo        ^(per-user, no admin^) and installs the packages in the same run.
 echo        Manual alternative: https://www.python.org/downloads/
 echo        ^(tick "Add python.exe to PATH"^), then run setup.cmd.
+echo        On a work PC that refuses that download ^(e.g. HTTP 403^), two routes that
+echo        need no working download are described in: "%~dp0offline\README.md"
 echo.
 pause & exit /b 1
 
@@ -229,6 +235,13 @@ if not exist "%~dp0requirements.txt" (
   echo     Re-download the ZIP and unzip ALL of it over this folder.
   pause & exit /b 1
 )
+rem python-build-standalone trees ship Lib\EXTERNALLY-MANAGED, and while it is present pip
+rem refuses the interpreter with "externally-managed-environment". install-python.ps1
+rem strips it at uv-install time, but a Python dropped in BY HAND still carries it -- and
+rem offline\README.md route B blesses exactly that. Re-establish the invariant here, every
+rem run, scoped to the folder the overlay owns (a system/conda interpreter elsewhere on
+rem PATH keeps its marker) -- same sweep install-python.ps1 performs after a uv install.
+for /f "delims=" %%e in ('dir /b /s /a-d "%LOCALAPPDATA%\Programs\Python\EXTERNALLY-MANAGED" 2^>nul') do del /f /q "%%e" >nul 2>nul
 echo Refreshing Python packages with !PY! ...
 call %PY% -m pip install --upgrade -r "%~dp0requirements.txt"
 rem An interrupted or proxy-blocked upgrade can leave a package UNINSTALLED - pip

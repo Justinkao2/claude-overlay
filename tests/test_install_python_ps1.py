@@ -40,11 +40,22 @@ def text():
 @pytest.fixture(scope="module")
 def code(text):
     """Just the executable lines -- comments explain intent, they do not implement it, and a
-    rule that a comment can satisfy is not a rule."""
+    rule that a comment can satisfy is not a rule. That includes the BODY of the <# ... #>
+    block comment at the top of the file: its lines start with '*' or plain words, not '#',
+    and leaving them in let a header sentence satisfy assertions meant for code."""
     out = []
+    in_block = False
     for line in text.splitlines():
         s = line.strip()
-        if s.startswith("#") or s.startswith("<#") or s.startswith(".") or not s:
+        if in_block:
+            if "#>" in s:
+                in_block = False
+            continue
+        if s.startswith("<#"):
+            if "#>" not in s[2:]:
+                in_block = True
+            continue
+        if s.startswith("#") or s.startswith(".") or not s:
             continue
         out.append(line)
     return "\n".join(out)
@@ -107,10 +118,12 @@ def test_all_three_windows_architectures_get_the_right_uv(code):
 def test_the_offline_archive_is_tried_before_the_network(code):
     """The point of the offline route is that it works on a machine whose download is refused.
     Ordering is what makes that true: checked first, it is also the path that gets exercised
-    routinely instead of only on the day it is needed."""
-    offline = code.find("Get-OfflineUvZip()")
-    if offline < 0:
-        offline = code.find("Get-OfflineUvZip")
+    routinely instead of only on the day it is needed.
+
+    Anchored on the CALL SITE, not the function definition: `function Get-OfflineUvZip {`
+    sits near the top of the file and precedes the download whatever order strategy 3 runs
+    in, so matching it would make this test unable to fail."""
+    offline = code.find("$offlineZip = Get-OfflineUvZip")
     download = code.find("Invoke-Download $uvUrl")
     assert offline > 0, "install-python.ps1 no longer looks for a pre-staged uv archive"
     assert download > 0, "install-python.ps1 no longer downloads uv"
@@ -210,7 +223,11 @@ def test_no_client_or_employer_name_leaks_into_the_public_repo():
     tracked = []
     for dirpath, dirnames, filenames in os.walk(ROOT):
         dirnames[:] = [d for d in dirnames
-                       if d not in (".git", "__pycache__", ".pytest_cache", "docs")]
+                       if d not in (".git", "__pycache__", ".pytest_cache", "docs",
+                                    # local-only build/env clutter: reading it wastes I/O
+                                    # and third-party text could trip the scan spuriously
+                                    ".venv", "venv", ".mypy_cache", ".ruff_cache",
+                                    "node_modules")]
         for name in filenames:
             if name.lower().endswith((".ps1", ".cmd", ".py", ".md", ".txt", ".yml", ".json")):
                 tracked.append(os.path.join(dirpath, name))

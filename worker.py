@@ -332,8 +332,10 @@ class ClaudeWorker(threading.Thread):
         # Some kwargs (max_buffer_size, can_use_tool, strict_mcp_config) only exist on newer
         # SDKs. Strip any the installed SDK rejects, one at a time, so an older install still
         # loads (with reduced features) instead of failing to construct options at all.
-        # mcp_servers is listed AFTER strict_mcp_config on purpose: if an old SDK forces us to
-        # drop strict, the declared servers are still worth keeping (they'd load anyway).
+        # The victim is whichever kwarg the TypeError NAMES (the list order below is only the
+        # last-resort tiebreak when the message names none of them), so an old SDK that
+        # rejects strict_mcp_config loses just that: the declared mcp_servers survive unless
+        # mcp_servers is itself what the SDK rejects.
         droppable = ["strict_mcp_config", "max_buffer_size", "can_use_tool",
                      "include_partial_messages", "skills", "disallowed_tools", "resume",
                      "mcp_servers"]

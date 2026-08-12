@@ -19,6 +19,11 @@ laptop — download the `uv` archive for the target architecture:
 |---|---|
 | 64-bit Intel/AMD (almost everything) | [`uv-x86_64-pc-windows-msvc.zip`](https://github.com/astral-sh/uv/releases/latest/download/uv-x86_64-pc-windows-msvc.zip) |
 | Windows on ARM | [`uv-aarch64-pc-windows-msvc.zip`](https://github.com/astral-sh/uv/releases/latest/download/uv-aarch64-pc-windows-msvc.zip) |
+| 32-bit Windows (rare) | [`uv-i686-pc-windows-msvc.zip`](https://github.com/astral-sh/uv/releases/latest/download/uv-i686-pc-windows-msvc.zip) |
+
+Match the file to the **target** machine's architecture — a 64-bit `uv.exe` staged for a
+32-bit Windows downloads fine and then will not run, which looks like a broken archive.
+(Only `.zip` archives are used; the `.tar.gz` uv publishes for other platforms is ignored.)
 
 Drop the `.zip` **in this folder**, then double-click `setup.cmd` again.
 

@@ -83,8 +83,10 @@ function Find-Python {
   if (-not (Test-Path $PyRoot)) { return $null }
   # Recurse by FILENAME rather than matching a Python3* directory, because strategy 3 installs
   # under uv's own naming (cpython-3.12.13-windows-x86_64-none) which no Python3* glob matches.
-  # This mirrors `dir /b /s ... python.exe` in the .cmd scripts, so this script and they can
-  # never disagree about whether an interpreter is present.
+  # This mirrors `dir /b /s ... python.exe` in the .cmd scripts, so both sides consider the
+  # same candidates. (One deliberate difference: the .cmd scans do not exclude Lib\venv --
+  # they probe every hit, so a template launcher costs them one slow FAILED probe rather
+  # than a wrong answer, while this script skips it outright.)
   #
   # Lib\venv\scripts\nt is skipped deliberately: every CPython ships venv TEMPLATE launchers
   # there, they are not usable interpreters, and one was measured taking 17 seconds to answer
@@ -122,29 +124,47 @@ function Invoke-Download($url, $dst) {
       return @{ ok = $true; code = "$code" }
     }
     Remove-Item $dst -Force -ErrorAction SilentlyContinue
-    if ("$code" -match '^\d{3}$' -and "$code" -ne '000') { return @{ ok = $false; code = "$code" } }
-    return @{ ok = $false; code = "curl exit $curlRc" }
+    # The code string must stand on its own in the per-route report. Two distinctions to
+    # keep: a non-zero curl exit WITH a 2xx status is a transfer that broke mid-body, not a
+    # refusal -- reporting it as "HTTP 200" would send the user chasing a proxy that
+    # answered fine; and a code that is not an HTTP status at all must not be printed
+    # after the word "HTTP".
+    if ($curlRc -ne 0) {
+      if ("$code" -match '^\d{3}$' -and "$code" -ne '000') { return @{ ok = $false; code = "curl exit $curlRc after HTTP $code" } }
+      return @{ ok = $false; code = "curl exit $curlRc, no HTTP status (could not connect?)" }
+    }
+    if ("$code" -match '^\d{3}$' -and "$code" -ne '000') { return @{ ok = $false; code = "HTTP $code" } }
+    return @{ ok = $false; code = 'curl exit 0, but no HTTP status' }
   }
   try {
     [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
     Invoke-WebRequest -Uri $url -OutFile $dst -UseBasicParsing
-    return @{ ok = (Test-Path $dst); code = 'via Invoke-WebRequest' }
+    if (Test-Path $dst) { return @{ ok = $true; code = 'via Invoke-WebRequest' } }
+    return @{ ok = $false; code = 'Invoke-WebRequest reported success but wrote no file' }
   } catch {
     Remove-Item $dst -Force -ErrorAction SilentlyContinue
     # $_.Exception.Response is present for an HTTP error and absent for a TLS/DNS failure, so
     # this still distinguishes "refused" from "could not connect" without curl.
     $st = $null
     try { $st = [int]$_.Exception.Response.StatusCode } catch { }
-    if ($st) { return @{ ok = $false; code = "$st (via Invoke-WebRequest)" } }
+    if ($st) { return @{ ok = $false; code = "HTTP $st (via Invoke-WebRequest)" } }
     return @{ ok = $false; code = "no HTTP status - $($_.Exception.Message)" }
   }
 }
 
+function Test-UvCmd($exe) {
+  # True only if this uv actually RUNS. A truncated uv.exe left by an interrupted extract,
+  # or a stale/blocked one on PATH, would otherwise be trusted outright -- short-circuiting
+  # the pre-staged zip AND the download below, and losing the whole strategy to a binary
+  # nothing ever verified. Same rule as Test-PyCmd: measure, don't assume.
+  try { & $exe --version *> $null; return ($LASTEXITCODE -eq 0) } catch { return $false }
+}
+
 function Get-UvExe {
   $onPath = Get-Command uv -ErrorAction SilentlyContinue
-  if ($onPath) { return $onPath.Source }
+  if ($onPath -and (Test-UvCmd $onPath.Source)) { return $onPath.Source }
   $local = Join-Path $UvHome 'uv.exe'
-  if (Test-Path $local) { return $local }
+  if ((Test-Path $local) -and (Test-UvCmd $local)) { return $local }
   return $null
 }
 
@@ -156,8 +176,27 @@ function Expand-UvZip($zip) {
     # Expand-Archive comes from a module that can be absent or blocked in a locked-down or
     # trimmed PowerShell. ZipFile is part of .NET itself on every Windows this app supports,
     # so it is the floor -- and losing the unzip step would waste a download that succeeded.
+    # Entry by entry, because the one-call overwrite overload
+    # ExtractToDirectory(zip, dir, $true) exists only on .NET Core: Windows PowerShell 5.1
+    # runs on .NET Framework, whose ZipFile has just (String,String) and
+    # (String,String,Encoding) -- measured, the 3-argument call throws 'Cannot find an
+    # overload' on exactly the trimmed machines this fallback exists for.
+    # ExtractToFile(entry, path, overwrite) exists on both runtimes.
     Add-Type -AssemblyName System.IO.Compression.FileSystem -ErrorAction SilentlyContinue
-    [System.IO.Compression.ZipFile]::ExtractToDirectory($zip, $UvHome, $true)
+    $archive = [System.IO.Compression.ZipFile]::OpenRead($zip)
+    try {
+      foreach ($entry in $archive.Entries) {
+        if ($entry.FullName -match '\.\.') { continue }   # no path escape from $UvHome
+        $target = Join-Path $UvHome $entry.FullName
+        if ($entry.FullName -match '[/\\]$') {
+          if (-not (Test-Path $target)) { New-Item -ItemType Directory -Path $target -Force | Out-Null }
+          continue
+        }
+        $parent = Split-Path $target -Parent
+        if (-not (Test-Path $parent)) { New-Item -ItemType Directory -Path $parent -Force | Out-Null }
+        [System.IO.Compression.ZipFileExtensions]::ExtractToFile($entry, $target, $true)
+      }
+    } finally { $archive.Dispose() }
   }
   return (Get-UvExe)
 }
@@ -194,9 +233,21 @@ if ($DryRun) {
   Write-Host "[DRY] installer URL          = $url"
   Write-Host "[DRY] uv already present     = $(Get-UvExe)"
   Write-Host "[DRY] uv URL                 = $uvUrl"
+  Write-Host "[DRY] offline uv archive     = $(Get-OfflineUvZip)"
+  Write-Host "[DRY] CPython mirror         = $env:UV_PYTHON_INSTALL_MIRROR"
   foreach ($u in @($url, $uvUrl)) {
-    $probe = & curl.exe -sIL -o NUL -w '%{http_code}' "$u"
-    Write-Host "[DRY] HTTP $probe  <- $u"
+    # Same floor as Invoke-Download: prefer curl.exe, but pre-1803 Windows 10 has none,
+    # and a dry run that errors there would misreport the very machine it is diagnosing.
+    if (Get-Command curl.exe -ErrorAction SilentlyContinue) {
+      $probe = & curl.exe -sIL -o NUL -w '%{http_code}' --max-time 25 "$u"
+      Write-Host "[DRY] HTTP $probe  <- $u"
+    } else {
+      try {
+        [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+        $r = Invoke-WebRequest -Uri $u -Method Head -UseBasicParsing -TimeoutSec 25
+        Write-Host "[DRY] HTTP $($r.StatusCode)  <- $u"
+      } catch { Write-Host "[DRY] check failed ($($_.Exception.Message))  <- $u" }
+    }
   }
   exit 0
 }
@@ -227,9 +278,11 @@ try {
   $dl = Invoke-Download $url $dst
   if (-not $dl.ok) {
     # A managed proxy commonly answers 403 for .exe specifically. Saying so is what tells the
-    # next reader that the network is fine and the FILE TYPE was refused.
-    $Report['python.org'] = "download refused - HTTP $($dl.code)"
-    Write-Host "[X] Download failed (HTTP $($dl.code)). Falling back to uv..."
+    # next reader that the network is fine and the FILE TYPE was refused. The code string
+    # already names itself ("HTTP 403" vs "curl exit 6, no HTTP status"), so it is printed
+    # as-is -- prefixing it with "HTTP" here turned connect failures into "HTTP curl exit 6".
+    $Report['python.org'] = "download failed - $($dl.code)"
+    Write-Host "[X] Download failed ($($dl.code)). Falling back to uv..."
   } else {
     Write-Host "Running the installer (per-user, no admin). This can take a minute..."
     $p = Start-Process -FilePath $dst -Wait -PassThru -ArgumentList @(
@@ -258,21 +311,33 @@ try {
     $offlineZip = Get-OfflineUvZip
     if ($offlineZip) {
       Write-Host "Using the pre-staged uv archive: $offlineZip"
-      $uv = Expand-UvZip $offlineZip
-      if (-not $uv) { $Report['uv'] = "offline\$(Split-Path $offlineZip -Leaf) held no uv.exe" }
+      # A corrupt staged zip must DEGRADE to the download below, not abort the strategy:
+      # without this catch an extract error would jump to the outer catch and skip the
+      # network attempt that was designed to follow it.
+      try { $uv = Expand-UvZip $offlineZip } catch { $uv = $null }
+      if (-not $uv) { $Report['uv'] = "offline\$(Split-Path $offlineZip -Leaf) held no working uv.exe" }
     }
   }
   if (-not $uv) {
     Write-Host "Downloading uv ($uvZip) ..."
     $zip = Join-Path $env:TEMP $uvZip
     $dl = Invoke-Download $uvUrl $zip
+    # Append rather than assign below: the staged-zip note (if any) has to survive into the
+    # give-up report, or the user re-runs against the same bad offline file with no clue.
     if (-not $dl.ok) {
-      $Report['uv'] = "download refused - HTTP $($dl.code) (redirects to release-assets.githubusercontent.com, which a proxy can block separately from github.com)"
-      throw "could not download uv (HTTP $($dl.code))"
+      $note = "download failed - $($dl.code) (redirects to release-assets.githubusercontent.com, which a proxy can block separately from github.com)"
+      if ($Report['uv'] -ne 'not attempted') { $note = "$($Report['uv']); then $note" }
+      $Report['uv'] = $note
+      throw "could not download uv ($($dl.code))"
     }
     $uv = Expand-UvZip $zip
     Remove-Item $zip -ErrorAction SilentlyContinue
-    if (-not $uv) { $Report['uv'] = 'downloaded, but no uv.exe inside the archive'; throw 'uv.exe not found after extract' }
+    if (-not $uv) {
+      $note = 'downloaded, but no working uv.exe inside the archive'
+      if ($Report['uv'] -ne 'not attempted') { $note = "$($Report['uv']); then $note" }
+      $Report['uv'] = $note
+      throw 'uv.exe not found after extract'
+    }
   }
   Write-Host "Installing Python $UvPyVersion with uv ($uv) ..."
 
@@ -300,7 +365,7 @@ try {
   # any version, and an unknown flag is a hard error that would lose the whole strategy. An env
   # var would be safer still (unknown ones are ignored) but uv documents no equivalent.
   $uvArgs = @('python', 'install', $UvPyVersion)
-  $uvHelp = & $uv python install --help
+  $uvHelp = & $uv python install --help 2>$null
   if ("$uvHelp" -match '--no-bin') { $uvArgs += '--no-bin' }
   & $uv @uvArgs
   $uvExit = $LASTEXITCODE

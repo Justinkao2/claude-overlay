@@ -318,9 +318,16 @@ def test_no_shipped_notice_hides_a_bare_bang():
             continue
         for lineno, line in enumerate(text.splitlines(), 1):
             s = line.strip()
-            if not s.lower().startswith("echo"):
+            low = s.lower()
+            # `set /p` prompt strings are displayed to the user too, and delayed
+            # expansion eats their bangs the same way an echo's are eaten.
+            if not (low.startswith("echo") or low.startswith("set /p")):
                 continue
-            if "!" in s and not re.search(r"![A-Za-z_][A-Za-z0-9_]*[:!]", s):
+            # Strip the LEGITIMATE expansions (!VAR!, !VAR:a=b!, !VAR:~0,1!) and flag any
+            # `!` left over. Skipping the whole line because one legit expansion exists
+            # would hide a bare `!` riding on the same line (`echo done with !PY! [!]`).
+            residue = re.sub(r"![A-Za-z_][A-Za-z0-9_]*(?::[^!]*)?!", "", s)
+            if "!" in residue:
                 offenders.append(f"{name}:{lineno}: {s}")
     assert not offenders, (
         "notice contains a bare `!` that delayed expansion will delete before the user "
@@ -448,14 +455,35 @@ OFFER = "setup.cmd fixes this"
 def _stub_setup(app, tmp_path, env):
     """A setup.cmd that records that it ran and nothing else. A test cannot install
     Python; what has to be pinned is that the launcher REACHES setup instead of telling
-    the user to go and find it."""
+    the user to go and find it.
+
+    Before handing the stub back, run it once against a throwaway marker until the
+    machine actually executes it. Endpoint protection on managed machines refuses to run
+    a .cmd written seconds ago ("Access is denied."), and when the refusal lands on this
+    INNER spawn it sits in the middle of the launcher's own output where _run's
+    whole-output retry cannot see it -- the launcher then truthfully reports that setup
+    fixed nothing, and the test blames the launcher for a stub the OS never ran. Warming
+    the exact file caches the verdict before the case under test needs it. Same rule as
+    _run: if the refusal never clears this FAILS rather than skipping."""
     ran = tmp_path / "SETUP_RAN.txt"
-    (app / "setup.cmd").write_text(
+    stub = app / "setup.cmd"
+    stub.write_text(
         "@echo off\n"
         "echo stub setup ran\n"
         '>"%OVERLAY_SETUP_MARKER%" echo ran\n', encoding="ascii")
     env["OVERLAY_SETUP_MARKER"] = str(ran)
-    return ran
+    warmed = tmp_path / "SETUP_WARM.txt"
+    warm_env = dict(env, OVERLAY_SETUP_MARKER=str(warmed))
+    for attempt in range(6):
+        subprocess.run(
+            ["cmd", "/c", "call", str(stub)], cwd=str(app), env=warm_env,
+            stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL, timeout=30)
+        if warmed.exists():
+            return ran
+        time.sleep(0.5 * (attempt + 1))
+    pytest.fail("endpoint protection kept refusing to run the freshly written stub "
+                f"setup.cmd ({_EDR_REFUSAL!r}) -- the case under test was never reachable")
 
 
 def _wait_for(marker, seconds=20):
