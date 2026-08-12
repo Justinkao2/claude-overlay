@@ -369,6 +369,21 @@ class TestMakeOptions:
         opts = make_worker()._make_options()
         assert opts.mcp_servers == servers
 
+    def test_effort_unset_passes_no_extra_args(self, monkeypatch):
+        # The no-op guarantee: with EFFORT="" (the shipped default) the options must carry
+        # no --effort, so the CLI keeps resolving effort exactly as it did before the knob
+        # existed (user settings.json effortLevel, or its own default).
+        monkeypatch.setattr(worker_module, "EFFORT", "")
+        opts = make_worker()._make_options()
+        assert not getattr(opts, "extra_args", None)
+
+    def test_effort_set_reaches_extra_args(self, monkeypatch):
+        # extra_args is the SDK's raw-flag passthrough: {"effort": "medium"} becomes
+        # `--effort medium` on the spawned CLI — the whole feature is this one flag.
+        monkeypatch.setattr(worker_module, "EFFORT", "medium")
+        opts = make_worker()._make_options()
+        assert getattr(opts, "extra_args", None) == {"effort": "medium"}
+
 
 # ---------------------------------------------------------------------------
 # 5b. _allow_tool (permission callback / interactive-tool guard)

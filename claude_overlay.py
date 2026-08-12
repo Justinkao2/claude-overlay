@@ -15,6 +15,7 @@ Run:   pythonw claude_overlay.py     (no console)
 import asyncio
 import base64
 import ctypes
+import hashlib
 import ctypes.wintypes as wt
 import json
 import os
@@ -217,6 +218,11 @@ class Overlay:
         self.pending_shot = None
         self.pending_images: list = []
         self._precaptured = None        # (shots, monotonic_ts) grabbed while typing
+        self._sent_shot_hashes: dict = {}  # capture-target key → sha256 of the last shot
+                                        # SENT for it; lets auto-screenshot skip re-attaching
+                                        # a byte-identical screen (see _dedupe_shots). Cleared
+                                        # whenever the conversation context may have lost the
+                                        # previous image (clear/compact/reconnect/error).
         self._precapture_after = None   # pending debounce timer id
         self._capture_busy = False      # a background precapture grab is in flight
         self._paste_busy = False        # a background clipboard paste is in flight
@@ -3024,10 +3030,21 @@ class Overlay:
         self._refresh_attach()
         self.entry.delete("1.0", "end")
         self._ph_active = False
+        # Auto-screenshots only: drop any capture that is byte-identical to the last one
+        # SENT for the same target — the model already has that exact image in context, so
+        # re-attaching it buys nothing and costs real latency (measured 2026-08: +0.7-2.6s
+        # TTFT per message for one monitor's inline image). A manual Snap is an explicit
+        # "attach it" and is never deduped. Legacy "read" mode isn't either: its old file
+        # may already be pruned from disk, so "refer to the previous one" can dangle.
+        unchanged = []
+        if self.auto_shot and shots and IMAGE_INPUT == "inline":
+            shots, unchanged = self._dedupe_shots(shots)
         n = (len(shots) if shots else 0) + len(images)
         label = text if text else "(look at my screens)"
         if n:
             label += (f"   🖼×{n}" if n > 1 else "   🖼")
+        elif unchanged:
+            label += "   🖼 unchanged"
         self.add_user(label)
         if self._resume_btn is not None:   # a NEW conversation is starting — resuming now
             try:                           # would silently discard it; retire the offer
@@ -3037,15 +3054,49 @@ class Overlay:
             self._resume_btn = None
         if IMAGE_INPUT == "inline":
             paths = [s["path"] for s in (shots or [])] + list(images)
-            self.worker.ask(self._inline_text(text, shots, images), paths)
+            self.worker.ask(self._inline_text(text, shots, images, unchanged), paths)
         else:
             self.worker.ask(self._build_prompt(text, shots, images), [])
         self._set_busy(True)
 
-    def _inline_text(self, text, shots, images):
+    @staticmethod
+    def _shot_key(s):
+        """What a screenshot is OF: dedupe must never compare across targets (window-scope
+        vs a monitor, or monitor 0 vs 1) — identical bytes for different targets is
+        practically impossible anyway, but the keying keeps the intent explicit."""
+        return ("window",) if s.get("window") is not None else ("mon", s.get("index"))
+
+    def _dedupe_shots(self, shots):
+        """Split auto-captured shots into (changed, unchanged) against the last SENT hash
+        per target, and remember the hashes of what we're about to send. Any read failure
+        counts as changed — when in doubt, attach (stale context is worse than 1s extra)."""
+        keep, unchanged = [], []
+        for s in shots:
+            try:
+                digest = hashlib.sha256(Path(s["path"]).read_bytes()).hexdigest()
+            except Exception:
+                keep.append(s)
+                continue
+            if self._sent_shot_hashes.get(self._shot_key(s)) == digest:
+                unchanged.append(s)
+            else:
+                keep.append(s)
+                self._sent_shot_hashes[self._shot_key(s)] = digest
+        return keep, unchanged
+
+    def _inline_text(self, text, shots, images, unchanged=None):
         """Short text companion for inline-image turns: the model sees the images
-        directly, so we only add a one-line note about what's attached."""
+        directly, so we only add a one-line note about what's attached. Deduped
+        captures (see _dedupe_shots) become an explicit "unchanged" pointer instead —
+        the model must know it can trust the previous screenshot, or it may assume it
+        has no current view of the screen at all."""
         note = []
+        if unchanged:
+            tags = ", ".join(
+                (f"the “{s['window']}” window" if s.get("window") is not None
+                 else f"monitor {s['index']}") for s in unchanged)
+            note.append(f"[My screen ({tags}) is UNCHANGED since the screenshot attached "
+                        f"to my previous message — keep using that one.]")
         if shots and shots[0].get("window") is not None:
             note.append(f"[Attached: a live screenshot of my ACTIVE WINDOW only — "
                         f"“{shots[0]['window']}” — not the full screen; other "
@@ -3056,8 +3107,14 @@ class Overlay:
             note.append(f"[Attached: a live screenshot of my screen — {tags}.]")
         if images:
             note.append(f"[Attached: {len(images)} pasted image(s).]")
-        body = text if text else ("Look at the attached screen(s)/image(s) and tell me "
-                                   "what's there / what I might want help with.")
+        if text:
+            body = text
+        elif shots or images:
+            body = ("Look at the attached screen(s)/image(s) and tell me "
+                    "what's there / what I might want help with.")
+        else:   # everything was deduped away — point at the context copy instead
+            body = ("Look at my screen (the screenshot from my previous message — "
+                    "it hasn't changed) and tell me what I might want help with.")
         return ("\n".join(note) + "\n\n" + body) if note else body
 
     def _precapture_soon(self, e=None):
@@ -3779,6 +3836,7 @@ class Overlay:
             # baseline. Nulling now would discard that correct value and leave a bare "—".
             self._refresh_statusline()
             self._set_busy(False)
+            self._sent_shot_hashes.clear()   # fresh context has no previous screenshot
         elif kind == "delta":
             self.add_delta(payload)
         elif kind == "think":
@@ -3844,9 +3902,17 @@ class Overlay:
             self._start_compact_anim()
         elif kind == "compact_done":
             self._stop_compact_anim(payload)
+            # Compaction may summarize the previous screenshot right out of the context;
+            # "screen unchanged, keep using it" would then point at nothing. Attach fresh.
+            self._sent_shot_hashes.clear()
         elif kind == "error":
             self.add_err(str(payload))
             self._set_busy(False)
+            # Any error may mean the turn (and its screenshot) never reached the model, or
+            # that the worker reconnected into a fresh session. Deliberately coarse: the
+            # cost of a wrong clear is one redundant image, the cost of a stale "unchanged"
+            # pointer is the model trusting a screenshot it does not have.
+            self._sent_shot_hashes.clear()
         elif kind == "result":
             self._md_finalize()          # finalize before any error line is appended
             self._finish_turn_copy()     # Copy button under whatever reply text we did get

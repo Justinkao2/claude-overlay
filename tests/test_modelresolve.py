@@ -58,6 +58,17 @@ def test_alias_is_case_and_whitespace_tolerant(monkeypatch, tmp_path):
     assert mr.resolve_model("  OPUS  ") == "claude-opus-4-8"
 
 
+def test_fable_alias_is_resolved_like_the_others(monkeypatch, tmp_path):
+    # "fable" joined config.MODELS so the overlay can run the same model a user's CLI is
+    # pinned to. It must go through the same resolve path (NOT pass through as an unknown
+    # spec, which would hand the streaming session a bare alias — the version-lag bug this
+    # module exists to prevent), and the [1m] suffix must compose with it.
+    monkeypatch.setattr(mr, "_CACHE_PATH", tmp_path / "c.json")
+    _patch_ok(monkeypatch, concrete="claude-fable-5")
+    assert mr.resolve_model("fable") == "claude-fable-5"
+    assert mr.resolve_model("fable[1m]") == "claude-fable-5[1m]"
+
+
 # ── graceful degradation: any failure returns the ORIGINAL spec (never breaks startup) ──
 
 def test_probe_failure_returns_original_alias(monkeypatch, tmp_path):

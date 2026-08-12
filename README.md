@@ -53,7 +53,9 @@ so it uses your **existing Claude subscription — no API key, no metered billin
   losing your context.
 - 💸 **No API key, no extra cost.** Runs on your existing Claude subscription.
 - 🖼️ **Screenshots *and* pasted images.** It grabs your screen automatically on every
-  message, or paste any image with **Ctrl+V** to ask about it.
+  message, or paste any image with **Ctrl+V** to ask about it. If your screen hasn't
+  changed since the last message, the duplicate isn't re-sent (Claude is told to keep
+  using the one it already has) — follow-up questions answer measurably faster.
 - ⚡ **Live, polished UI.** Responses stream token-by-token with clean tool-call
   chips, an in-place model switcher, and a context-usage meter.
 - 🎨 **Looks the part, crisp anywhere.** Styled after the Claude desktop app,
@@ -370,11 +372,11 @@ to change, using the constant names below — for example:
 }
 ```
 
-Overridable: `WORKING_DIR`, `MODEL`, `PERMISSION_MODE`, `SKILLS`, `STRICT_MCP_CONFIG`,
-`CLI_UPDATE_CHECK`, `AUTO_SCREENSHOT_DEFAULT`, `SHOT_SCOPE`, `SHOT_FORMAT`,
-`SHOT_JPEG_QUALITY`, `HIDE_SCREENSHOT_TOOL`, `THEME`, `SHOW_IN_SCREEN_SHARE_DEFAULT`,
-`TASKBAR_BUTTON`, `HOTKEY`, `WINDOW_ALPHA`, `CORNER_RADIUS`, `ORB_SIZE`,
-`FONT_SANS` / `FONT_SERIF` / `FONT_MONO`.
+Overridable: `WORKING_DIR`, `MODEL`, `EFFORT`, `PERMISSION_MODE`, `SKILLS`,
+`STRICT_MCP_CONFIG`, `CLI_UPDATE_CHECK`, `AUTO_SCREENSHOT_DEFAULT`, `SHOT_SCOPE`,
+`SHOT_FORMAT`, `SHOT_JPEG_QUALITY`, `HIDE_SCREENSHOT_TOOL`, `THEME`,
+`SHOW_IN_SCREEN_SHARE_DEFAULT`, `TASKBAR_BUTTON`, `HOTKEY`, `WINDOW_ALPHA`,
+`CORNER_RADIUS`, `ORB_SIZE`, `FONT_SANS` / `FONT_SERIF` / `FONT_MONO`.
 
 Precedence, weakest to strongest: the constants in `config.py` < `config.json` < an
 explicitly set `CLAUDE_OVERLAY_*` env var — and the remembered ⚙-toggle state
@@ -388,10 +390,18 @@ The settings themselves:
 
 - `MODEL` — defaults to `"opus"`, a **family alias for the latest Opus**, so a future
   Opus release is adopted automatically. Use `"opus[1m]"` for the 1M-context variant, or
-  `"sonnet"` / `"haiku"` — every alias tracks the newest model of its family, and the
-  in-app switcher lists them all (the statusline shows the concrete version each alias
-  resolved to, e.g. `claude-opus-4-8`). Don't use `None`: the Agent SDK resolves `None`
-  to an older model, not the CLI's interactive default.
+  `"fable"` / `"sonnet"` / `"haiku"` — every alias tracks the newest model of its family,
+  and the in-app switcher lists them all (the statusline shows the concrete version each
+  alias resolved to, e.g. `claude-opus-4-8`). Don't use `None`: the Agent SDK resolves
+  `None` to an older model, not the CLI's interactive default.
+- `EFFORT` — reasoning-effort ceiling for overlay sessions: `"low"`, `"medium"`,
+  `"high"`, `"xhigh"`, `"max"`, or `""` (default) to inherit your CLI's setting
+  (`effortLevel` in `~/.claude/settings.json`, or the CLI default). The same dial as the
+  CLI's `--effort` flag, scoped to the overlay. Worth knowing: a global `effortLevel`
+  tuned for deep terminal work makes the model **think for extra seconds before every
+  overlay reply** — at `xhigh` we measured 6–11s of thinking on even one-line questions.
+  If the overlay feels slow to start answering, set `"high"` or `"medium"` here; your
+  terminal sessions keep their own setting. Applied at session start, not mid-chat.
 - `PERMISSION_MODE` — `"bypassPermissions"` by default (see security note below); this
   is just the **first-launch** mode — the **⚙ → Read-only** menu item switches
   the live session between `"plan"` (read-only) and this mode at any time, and the

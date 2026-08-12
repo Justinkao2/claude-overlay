@@ -186,13 +186,16 @@ class TestModels:
     def test_models_use_family_aliases_not_pinned_versions(self):
         # The whole point of the switcher: every entry tracks the LATEST model of its
         # family, so no id may hardcode a version (e.g. "claude-opus-4-8") — that would
-        # freeze the overlay on an old model until someone edits this file. Allowed ids
-        # are the bare family aliases opus/sonnet/haiku, optionally with a "[1m]" suffix.
+        # freeze the overlay on an old model until someone edits this file. The single
+        # source of truth for "is a resolvable family alias" is modelresolve._ALIAS_RE
+        # (an id it doesn't match passes through UNresolved, i.e. version-lagged) — pin
+        # against that, not a second copy of the family list.
+        import modelresolve
         for _, model_id in config.MODELS:
-            base = model_id.replace("[1m]", "")
-            assert base in ("opus", "sonnet", "haiku"), (
-                f"MODELS id {model_id!r} is not a bare family alias — it won't auto-update "
-                f"to new model releases. Use 'opus'/'sonnet'/'haiku' (optionally '[1m]')."
+            assert modelresolve._ALIAS_RE.match(model_id), (
+                f"MODELS id {model_id!r} is not an alias modelresolve can resolve — it "
+                f"won't auto-update to new model releases (and over the SDK's streaming "
+                f"transport it would silently run a version-behind model)."
             )
 
 
@@ -412,6 +415,24 @@ class TestUserConfig:
         assert c.PERMISSION_MODE == "bypassPermissions"
         assert len(c.USER_CONFIG_WARNINGS) == 1
         assert "PERMISSION_MODE" in c.USER_CONFIG_WARNINGS[0]
+
+    def test_effort_defaults_to_inherit(self):
+        # "" = pass nothing, so the CLI keeps honouring the user's own settings.json
+        # effortLevel. The overlay must never silently override a reasoning-depth choice.
+        assert config.EFFORT == ""
+
+    def test_effort_override_is_accepted_and_canonical(self, load_cfg):
+        c = load_cfg({"EFFORT": "Medium"})
+        assert c.EFFORT == "medium"
+        assert c.USER_CONFIG_WARNINGS == []
+
+    def test_effort_typo_warns_and_keeps_inherit(self, load_cfg):
+        # A rejected value must fall back to "" (inherit), not to some fixed effort — and
+        # it must be SEEN: an unnoticed typo here would otherwise quietly change how long
+        # the model thinks on every single message.
+        c = load_cfg({"EFFORT": "ultra"})
+        assert c.EFFORT == ""
+        assert any("EFFORT" in w for w in c.USER_CONFIG_WARNINGS)
 
     def test_unknown_key_warns(self, load_cfg):
         c = load_cfg({"PERMISSON_MODE": "plan"})     # typo'd key must be SEEN

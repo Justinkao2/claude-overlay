@@ -3,7 +3,36 @@
 All notable changes to Claude Overlay are documented here.
 This project follows [Semantic Versioning](https://semver.org/).
 
-## [1.16.1] - 2026-08-12
+## [Unreleased]
+
+Response-speed work, driven by a benchmark of the overlay against the Claude Code CLI
+(same machine, same tasks — trivial replies, a file write, a PowerPoint-COM edit). The
+engine verdict: the overlay's SDK transport is **not** slower than the CLI — the
+measurable per-message gap was the auto-screenshot payload (+0.7–2.6s time-to-first-token
+per message), and the biggest absolute delay on both sides was reasoning effort
+(`xhigh` spends 6–11s thinking before even a one-line answer).
+
+### Added
+- **Unchanged screens are no longer re-sent.** Auto-screenshot now skips any capture
+  that is byte-identical to the last one sent for the same monitor/window and tells
+  Claude to keep using the copy it already has (the chat shows `🖼 unchanged`). Quick
+  follow-ups — the most latency-sensitive messages there are — get their 1–3 seconds
+  back. Cleared whenever the previous image may have left the context (Clear,
+  compaction, any error/reconnect), because a stale "unchanged" pointer would be worse
+  than a redundant image. Manual Snap always attaches.
+- **`EFFORT` config knob** — the CLI's `--effort` dial, scoped to the overlay:
+  `"low"`…`"max"`, or `""` (default) to keep inheriting your `settings.json`
+  `effortLevel`. A global effort tuned for deep terminal work quietly taxes every
+  overlay reply; now the overlay can run snappier without touching CLI sessions.
+- **Fable in the model switcher** (`"fable"` / `"fable[1m]"` aliases, resolved to the
+  concrete latest id like the other families) — so the overlay can run exactly what a
+  CLI pinned to Fable runs.
+
+### Notes from the benchmark (nothing to fix, worth knowing)
+- Session connect has a ~10s floor (CLI/node startup); the overlay's declared MCP
+  server and skills add under a second of it.
+- `claude -p` (headless) can silently run the **org default model instead of your
+  `settings.json` pin** — pin with `--model` when benchmarking anything.
 
 Hardening for the Python-install path that 1.16.0 introduced, from a post-release
 review. No new features; if 1.16.0 installed Python for you, nothing changes.

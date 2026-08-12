@@ -47,7 +47,7 @@ from pathlib import Path
 # Bare family aliases the overlay ships in config.MODELS, optionally with the "[1m]"
 # 1M-context suffix. Only these get resolved; a concrete id / "inherit" / anything else
 # passes through untouched.
-_ALIAS_RE = re.compile(r"^(opus|sonnet|haiku)(\[1m\])?$", re.IGNORECASE)
+_ALIAS_RE = re.compile(r"^(opus|sonnet|haiku|fable)(\[1m\])?$", re.IGNORECASE)
 _CACHE_PATH = Path.home() / ".claude-overlay" / "model_cache.json"
 _CREATE_NO_WINDOW = 0x08000000 if sys.platform == "win32" else 0
 _PROBE_TIMEOUT = 30      # seconds for the one-shot -p resolve turn (cache miss only)

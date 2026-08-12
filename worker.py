@@ -300,6 +300,12 @@ class ClaudeWorker(threading.Thread):
                            "append": SYSTEM_APPEND, "exclude_dynamic_sections": True},
         )
         opts["max_buffer_size"] = MAX_BUFFER_SIZE
+        if EFFORT:
+            # Same dial as the CLI's --effort flag, scoped to this overlay session. ""
+            # (default) passes nothing, so the CLI keeps honouring the user's own
+            # settings.json effortLevel — the overlay only ever LOWERS/RAISES effort when
+            # explicitly told to in config. extra_args is the SDK's raw-flag passthrough.
+            opts["extra_args"] = {"effort": EFFORT}
         if DISALLOWED_TOOLS:
             # Remove interactive tools the overlay can't service (AskUserQuestion) from the
             # tool schema entirely, so the model can't call them and hang the turn — it asks
@@ -338,7 +344,7 @@ class ClaudeWorker(threading.Thread):
         # mcp_servers is itself what the SDK rejects.
         droppable = ["strict_mcp_config", "max_buffer_size", "can_use_tool",
                      "include_partial_messages", "skills", "disallowed_tools", "resume",
-                     "mcp_servers"]
+                     "mcp_servers", "extra_args"]
         self._last_dropped = []
         while True:
             try:

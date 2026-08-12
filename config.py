@@ -51,7 +51,19 @@ WORKING_DIR = str(Path.home())
 # (e.g. "claude-opus-4-8"), so you can always see what you're on.
 MODEL = "opus"   # startup default: the latest Opus family
 MODELS = [("Opus", "opus"), ("Opus (1M)", "opus[1m]"),
+          ("Fable", "fable"), ("Fable (1M)", "fable[1m]"),
           ("Sonnet", "sonnet"), ("Haiku", "haiku")]  # click the statusline to switch
+
+# Reasoning-effort ceiling for overlay sessions: "low" | "medium" | "high" | "xhigh" |
+# "max", or "" (default) to inherit whatever the CLI would use — your
+# ~/.claude/settings.json `effortLevel`, or the CLI's own default. This is the same dial
+# as the CLI's `--effort` flag, scoped to the overlay only. Why it exists: a floating
+# screen-chat lives on quick turnaround, and a global effortLevel tuned for deep terminal
+# work (e.g. "xhigh") makes the model think for many extra seconds before EVERY overlay
+# reply — measured 2026-08: at xhigh even a trivial one-liner spent 6-11s thinking first.
+# Setting a lower ceiling here buys that time back without touching your CLI sessions.
+# Applied at session start (connect/reconnect), not mid-conversation.
+EFFORT = ""
 PERMISSION_MODE = "bypassPermissions"
                                  # the STARTUP permission mode; flip it at run time with the
                                  # status-bar "Read-only" toggle (◉ = "plan", a read-only agent
@@ -398,6 +410,9 @@ _USER_CONFIG_KEYS = {
     # reaches worker._allow_tool, so the blanket approve there cannot undo it.
     # Requires a recent model (Haiku is not supported) and an account with auto mode enabled.
     "PERMISSION_MODE": _v_choice("bypassPermissions", "acceptEdits", "default", "plan", "auto"),
+    # "" = inherit the CLI/settings.json effort. The overlay validates the value because a
+    # typo here would otherwise surface as an opaque connect failure two screens later.
+    "EFFORT": _v_choice("", "low", "medium", "high", "xhigh", "max"),
     "SKILLS": _v_skills,                       # "all" | ["name", …] | null
     "STRICT_MCP_CONFIG": _v_bool,
     "MCP_SERVERS": _v_mcp_servers,             # {name: {...}} — loads even under strict
