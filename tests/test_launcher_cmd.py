@@ -40,7 +40,7 @@ LAUNCHER = os.path.join(ROOT, "Start Claude Overlay.cmd")
 # The .cmd files that have to agree about where Python can be found. They are separate
 # scripts on purpose (a user may copy just one out of a ZIP), so the shared block is
 # duplicated text -- and duplicated text is what drifts. See the identity test below.
-SHARES_DISCOVERY = ("Start Claude Overlay.cmd", "Diagnose.cmd", "update-finish.cmd")
+SHARES_DISCOVERY = ("Start Claude Overlay.cmd", "Diagnose.cmd", "update.cmd")
 BEGIN = "rem ---- BEGIN find-pythonw"
 END = "rem ---- END find-pythonw"
 
@@ -194,20 +194,43 @@ def test_update_does_not_run_git_pull_from_the_file_git_is_replacing():
         f"(guard at line {guard + 1}), so git can rewrite the script mid-run again")
 
 
-def test_the_post_pull_half_is_a_separate_file():
-    """update.cmd's own body cannot be trusted after the pull, and the post-pull work
-    should run the version that was just DOWNLOADED rather than the one being replaced.
-    Both of those need it to live in its own file."""
-    finish = os.path.join(ROOT, "update-finish.cmd")
-    assert os.path.exists(finish), "update-finish.cmd is gone; update.cmd calls it"
+def test_the_post_pull_half_runs_the_freshly_pulled_file():
+    """The post-pull work must be the version that was just DOWNLOADED, not the one being
+    replaced -- it is the half that knows where this release looks for Python and what
+    requirements.txt now pins. This used to be guaranteed by putting it in a second file
+    (update-finish.cmd); it is now guaranteed by the driver calling back into the update.cmd
+    sitting in the REPO, which the pull has just rewritten, in --finish mode.
+
+    The property is the same either way and this test states it directly: the hand-off must
+    name %REPO% (the pulled copy) and must NOT go through %~dp0, which for the driver is
+    %TEMP% -- i.e. the pre-pull body it is trying to escape. A bare quoted filename does not
+    work either: cmd looks one up as a literal program name and reports
+    '"update.cmd"' is not recognized."""
     text = read("update.cmd")
-    assert 'call "%REPO%\\update-finish.cmd"' in text, (
-        "update.cmd no longer hands off to update-finish.cmd")
-    # The hand-off must be ABSOLUTE. The driver runs from %TEMP%, so %~dp0 is the wrong
-    # folder there, and `call "update-finish.cmd"` fails outright: cmd looks up a quoted
-    # bare filename as a literal program name.
-    assert '%~dp0update-finish.cmd' not in text, (
-        "update.cmd resolves update-finish.cmd via %~dp0, which is %TEMP% for the driver")
+    assert 'call "%REPO%\\update.cmd" --finish' in text, (
+        "update.cmd's driver no longer hands off to the pulled copy in --finish mode")
+    body = [l for l in text.splitlines() if not l.lstrip().startswith("rem ")]
+    assert not any("%~dp0update.cmd" in l for l in body), (
+        "the driver resolves the post-pull half via %~dp0, which is %TEMP% for the driver")
+
+
+def test_finish_mode_is_dispatched_before_the_reexec():
+    """The recursion guard, and the reason the two files could become one safely.
+
+    --finish and the %TEMP% re-exec live in the same file now. If a --finish invocation ever
+    fell through to the re-exec, the driver would pull, call --finish, land back at the top,
+    copy itself to %TEMP%, pull again -- forever, with a `git pull` on every lap. Dispatch
+    order is the only thing preventing that, so it is pinned rather than left to whoever
+    edits the header next."""
+    lines = [l.strip() for l in read("update.cmd").splitlines()
+             if not l.lstrip().startswith("rem ")]
+    finish = next((i for i, l in enumerate(lines) if '"%~1"=="--finish"' in l), None)
+    reexec = next((i for i, l in enumerate(lines) if '"%~1"=="--from-temp"' in l), None)
+    assert finish is not None, "update.cmd no longer dispatches --finish"
+    assert reexec is not None, "update.cmd no longer re-execs itself from outside the repo"
+    assert finish < reexec, (
+        "update.cmd checks --from-temp before --finish, so a --finish run falls through "
+        "into the re-exec and pulls in an infinite loop")
 
 
 def test_nothing_installs_a_hardcoded_package_list():
@@ -266,16 +289,42 @@ def test_ci_is_the_canary_for_new_sdk_releases():
 
 
 def test_update_can_fall_back_to_pythonw_itself():
-    """update-finish.cmd prefers the sibling python.exe for readable pip output. That
-    preference must stay a preference: if the sibling doesn't run, the launcher's own
+    """update.cmd's --finish half prefers the sibling python.exe for readable pip output.
+    That preference must stay a preference: if the sibling doesn't run, the launcher's own
     pythonw is still the right environment to install into, and refusing is how these
     machines got stuck un-updatable."""
-    text = read("update-finish.cmd")
+    text = read("update.cmd")
     body = [l for l in text.splitlines() if not l.lstrip().startswith("rem ")]
     sibling_line = next(i for i, l in enumerate(body) if "pythonw.exe=python.exe" in l)
     later = "\n".join(body[sibling_line:])
     assert 'if not defined PY if defined PYW set PY="!PYW!"' in later, (
-        "update-finish.cmd derives the sibling python.exe but has no fallback to pythonw")
+        "update.cmd derives the sibling python.exe but has no fallback to pythonw")
+
+
+def test_no_shipped_notice_hides_a_bare_bang():
+    """These scripts run with delayed expansion on, where a lone `!` in an `echo` is EATEN:
+    `echo [!] x` prints `[] x`, and `^!` does not rescue it in this position either
+    (measured, both). update-finish.cmd shipped several `[!]` notices that every user
+    therefore read as `[]`, which looks like a typo in the product exactly when the reader
+    is already stuck.
+
+    Scoped to the scripts that actually enable delayed expansion -- setup.cmd does not, and
+    its `[!]` notices render correctly, which is why the launcher runs it through a fresh
+    `cmd /c` rather than inheriting this window's expansion."""
+    offenders = []
+    for name in cmd_files():
+        text = read(name)
+        if "enabledelayedexpansion" not in text.lower():
+            continue
+        for lineno, line in enumerate(text.splitlines(), 1):
+            s = line.strip()
+            if not s.lower().startswith("echo"):
+                continue
+            if "!" in s and not re.search(r"![A-Za-z_][A-Za-z0-9_]*[:!]", s):
+                offenders.append(f"{name}:{lineno}: {s}")
+    assert not offenders, (
+        "notice contains a bare `!` that delayed expansion will delete before the user "
+        "sees it:\n" + "\n".join(offenders))
 
 
 # --------------------------------------------------------------------------------------
@@ -340,10 +389,13 @@ def _sandbox(tmp_path, shim_dir, shim_body=None):
 _EDR_REFUSAL = "Access is denied."
 
 
-def _run(app, env, tmp_path, answer=None):
+def _run(app, env, tmp_path, answer=None, script="Start Claude Overlay.cmd", args=()):
     """Collect output through a FILE, not a pipe: the launcher's `start` hands its stdout
     handle to the process it spawns, so waiting for pipe EOF would mean waiting for the
     overlay itself to exit.
+
+    `script`/`args` exist so update.cmd's post-pull half can be driven through the same
+    endpoint-protection retry below rather than a second copy of it.
 
     `answer` is typed at whatever the launcher prompts for. Leaving it None is a distinct
     case rather than "no answer": with stdin at EOF cmd's `set /p` leaves the variable
@@ -364,7 +416,7 @@ def _run(app, env, tmp_path, answer=None):
             stdin = open(str(keyed), "rb") if answer is not None else None
             try:
                 p = subprocess.run(
-                    ["cmd", "/c", "call", str(app / "Start Claude Overlay.cmd")],
+                    ["cmd", "/c", "call", str(app / script), *args],
                     cwd=str(app), env=env,
                     stdin=stdin if stdin is not None else subprocess.DEVNULL,
                     stdout=fh, stderr=subprocess.STDOUT, timeout=90)
@@ -503,6 +555,96 @@ def test_declining_the_offer_leaves_the_manual_instructions(tmp_path):
     app, marker, env = _pythonless(tmp_path)
     ran = _stub_setup(app, tmp_path, env)
     rc, out = _run(app, env, tmp_path, answer="n\n")
+    assert not ran.exists(), f"ran setup.cmd after the user declined\n--- output ---\n{out}"
+    assert "Manual alternative" in out, (
+        f"declining left the user with no instructions at all\n--- output ---\n{out}")
+
+
+# --------------------------------------------------------------------------------------
+# Behavioural: update.cmd's post-pull half, on a machine where nothing will run Python.
+#
+# This branch used to print "Double-click setup.cmd" and stop -- the same dead end the
+# launcher had, and reached by the same route: everybody who sees it double-clicked a file
+# from a folder they cannot see. It mattered more here, because update.cmd never installs
+# Python itself, so "run Update again" could not clear the wall however many times a stuck
+# user tried it. On a BCG-managed machine, where device policy blocks PSF-signed Python
+# installers outright, this is the only branch an affected user ever reaches.
+# --------------------------------------------------------------------------------------
+
+def _pythonless_update(tmp_path):
+    """update.cmd in a sandbox where nothing anywhere will run Python.
+
+    --finish is invoked directly, and that is also what proves the mode dispatch works: this
+    folder is not a git clone, so a --finish run that fell through into the driver would
+    complain about git and never reach the Python search at all."""
+    app, _marker, env = _pythonless(tmp_path)
+    shutil.copyfile(os.path.join(ROOT, "update.cmd"), str(app / "update.cmd"))
+    # Present so that a run which gets PAST the Python search cannot stop on this instead
+    # and be mistaken for the refusal under test.
+    (app / "requirements.txt").write_text("pillow\n", encoding="ascii")
+    return app, env
+
+
+def _run_finish(app, env, tmp_path, answer=None):
+    return _run(app, env, tmp_path, answer=answer, script="update.cmd", args=("--finish",))
+
+
+@windows_only
+def test_update_runs_setup_for_you_rather_than_naming_it(tmp_path):
+    """The dead end, pinned on the update path too. Pressing Enter accepts, which is what
+    an empty stdin reproduces here.
+
+    `== 1` is the loop guard and the reason this is more than a smoke test: --finish re-runs
+    its whole search after setup, so it can find an interpreter PATH will never mention, and
+    a re-search that fails lands back on this very screen. The stub setup fixes nothing, so
+    without a latch this is exactly the shape that would spin -- and each lap of the
+    unlatched version would be a fresh `git pull`."""
+    app, env = _pythonless_update(tmp_path)
+    ran = _stub_setup(app, tmp_path, env)
+    rc, out = _run_finish(app, env, tmp_path)
+    assert ran.exists(), (
+        "update.cmd named setup.cmd but never ran it, so a user who cannot find that file "
+        f"is still stuck\n--- output ---\n{out}")
+    assert out.count(OFFER) == 1, (
+        f"setup was offered {out.count(OFFER)} times; it must be offered at most once\n"
+        f"--- output ---\n{out}")
+
+
+@windows_only
+def test_update_does_not_claim_success_when_the_packages_were_skipped(tmp_path):
+    """The false-success guard. The old post-pull half printed its warning and then carried
+    on to the "[OK] Updated" banner and exit 0, so an update that left the app unable to
+    start reported exactly the same thing as one that worked. The pull genuinely did
+    succeed, so the message has to say so -- but the exit status must not."""
+    app, env = _pythonless_update(tmp_path)
+    _stub_setup(app, tmp_path, env)
+    rc, out = _run_finish(app, env, tmp_path)
+    assert "[OK] Updated" not in out, (
+        f"claimed the update was complete with no interpreter to run it\n{out}")
+    assert rc != 0, f"exited 0 after skipping the packages\n--- output ---\n{out}"
+    assert "code IS updated" in out, (
+        f"did not tell the user the pull itself succeeded\n--- output ---\n{out}")
+
+
+@windows_only
+def test_update_does_not_offer_a_setup_it_does_not_have(tmp_path):
+    """Someone who copied one file out of the ZIP has no setup.cmd; offering to run it would
+    replace a useless message with a broken one. The manual instructions have to survive
+    that branch."""
+    app, env = _pythonless_update(tmp_path)
+    assert not (app / "setup.cmd").exists(), "test premise: this sandbox has no setup.cmd"
+    rc, out = _run_finish(app, env, tmp_path)
+    assert OFFER not in out, f"offered to run a setup.cmd that is not there\n{out}"
+    assert "Manual alternative" in out, (
+        f"dropped the instructions along with the offer\n--- output ---\n{out}")
+
+
+@windows_only
+def test_update_declining_the_offer_leaves_the_manual_instructions(tmp_path):
+    """"n" has to mean no, and still has to answer the question the user came with."""
+    app, env = _pythonless_update(tmp_path)
+    ran = _stub_setup(app, tmp_path, env)
+    rc, out = _run_finish(app, env, tmp_path, answer="n\n")
     assert not ran.exists(), f"ran setup.cmd after the user declined\n--- output ---\n{out}"
     assert "Manual alternative" in out, (
         f"declining left the user with no instructions at all\n--- output ---\n{out}")
