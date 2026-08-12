@@ -303,7 +303,22 @@ That screen now tells you which of two different problems you have. If every pat
 sits under `\WindowsApps\` **and** it finds nothing off `PATH`, this PC genuinely has no
 Python — those `\WindowsApps\` entries are Windows placeholders that only print
 *"Python was not found…"* when run. Double-click **`setup.cmd`**: it installs Python for
-you, per-user, no admin needed.
+you, per-user, no admin needed. (`update.cmd` offers to run it for you too, so on a machine
+with no Python you can double-click either one and it gets sorted.)
+
+### Locked-down work laptop? (`403`, or an installer that won't run)
+
+If `setup.cmd` can't install Python and the reason it prints is an **HTTP 403** — or the
+installer downloads and then silently refuses to run — that's your employer's proxy or
+endpoint-security software, not a bug here. `setup.cmd` already tries three routes (winget →
+python.org → [uv](https://github.com/astral-sh/uv), whose CPython build isn't blocked by the
+signature rules that stop the others), and it prints what each one reported so you have
+something specific to send IT.
+
+When all three are refused, **[`offline/README.md`](offline/README.md) has two routes that
+need no working download at all** — pre-stage one `.zip` from any machine that *can* reach
+GitHub, or just drop any Python 3.10+ folder into `%LOCALAPPDATA%\Programs\Python\` (every
+script here *scans* that folder and uses whatever runs, no matter how it got there).
 
 ---
 

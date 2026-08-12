@@ -567,7 +567,7 @@ def test_declining_the_offer_leaves_the_manual_instructions(tmp_path):
 # launcher had, and reached by the same route: everybody who sees it double-clicked a file
 # from a folder they cannot see. It mattered more here, because update.cmd never installs
 # Python itself, so "run Update again" could not clear the wall however many times a stuck
-# user tried it. On a BCG-managed machine, where device policy blocks PSF-signed Python
+# user tried it. On a managed corporate machine whose device policy blocks PSF-signed Python
 # installers outright, this is the only branch an affected user ever reaches.
 # --------------------------------------------------------------------------------------
 

@@ -173,7 +173,7 @@ rem is not visible. And update.cmd never installs Python itself, so "just run Up
 rem could not clear the wall however many times they tried it. Both routes a stuck user
 rem actually takes ended at "go and find a file you cannot see".
 rem
-rem That is not hypothetical: on a BCG-managed machine, where the device policy blocks
+rem That is not hypothetical: on a managed corporate machine whose device policy blocks
 rem PSF-signed Python installers outright, this is the ONLY branch an affected user ever
 rem reaches -- so it had to become the branch that fixes the problem.
 rem

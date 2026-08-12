@@ -49,6 +49,13 @@ echo [X] Python is not available in this window yet.
 echo     If you just installed it, CLOSE this window and run setup.cmd again -- a fresh
 echo     window picks up the updated PATH. Or install manually from
 echo     https://www.python.org/downloads/ ^(tick "Add python.exe to PATH"^), then re-run.
+echo.
+rem Sending a blocked user to python.org is sending them back at the wall they just hit: on a
+rem managed PC that download is exactly what gets refused (403), and even when it arrives the
+rem installer can be blocked by signature. The routes that do not need it are in offline\.
+echo     On a work PC that REFUSED the download above ^(e.g. HTTP 403^), python.org will
+echo     refuse it again. Two routes that need no working download are described in:
+echo       "%~dp0offline\README.md"
 pause & exit /b 1
 
 :pyfound
