@@ -544,6 +544,9 @@ class ClaudeWorker(threading.Thread):
                     self._resume_session_id = None
                     self._resume_expected = None
                     self._session_id = None      # this connect is FRESH, not the resumed id
+                    # Anything the UI remembers ABOUT the old conversation (the screenshot
+                    # dedupe cache) is now about a context that no longer exists.
+                    self.ui.put(("session_replaced", None))
                     self.ui.put(("system",
                         "⚠ Your claude-agent-sdk is too old to resume a conversation "
                         "(no --resume support) — started a fresh session. Run update.cmd "
@@ -629,7 +632,7 @@ class ClaudeWorker(threading.Thread):
         lowercased string. Lets us tell 'same family, the version just lags' apart from a
         genuine cross-family override."""
         m = (m or "").lower()
-        for fam in ("opus", "sonnet", "haiku"):
+        for fam in ("opus", "sonnet", "haiku", "fable"):
             if fam in m:
                 return fam
         return m
@@ -1073,3 +1076,10 @@ class ClaudeWorker(threading.Thread):
                 data = getattr(msg, "data", None)
                 if isinstance(data, dict):
                     self._set_session(data.get("session_id"))
+            elif getattr(msg, "subtype", None) == "compact_boundary":
+                # The CLI compacted the conversation ON ITS OWN (context filled up
+                # mid-stream) — unlike the explicit /compact flow there's no compact_done,
+                # so without this the UI never learns the summary may have dropped earlier
+                # screenshots and its dedupe would keep saying "screen unchanged, use the
+                # previous image" about an image that no longer exists in context.
+                self.ui.put(("auto_compacted", None))

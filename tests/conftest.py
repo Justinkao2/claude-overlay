@@ -136,6 +136,7 @@ def _clean_overlay(ov):
     ov.pending_shot = None
     ov._precaptured = None
     ov._sent_shot_hashes = {}           # screenshot dedupe memory must not leak across tests
+    ov._pending_shot_hashes = {}        # nor the in-flight (uncommitted) staging dict
     ov._discard_pending = False         # reset() sets it True; a real run clears it on the
                                         # worker's reset_done, which the fixture never delivers
     ov._capture_busy = False

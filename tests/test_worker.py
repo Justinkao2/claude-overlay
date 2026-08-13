@@ -182,6 +182,28 @@ class TestCompactResultSignal:
 # 4. _build_query
 # ---------------------------------------------------------------------------
 
+class TestAutoCompactBoundary:
+    """The CLI's AUTOMATIC compaction arrives as a compact_boundary SystemMessage inside a
+    NORMAL turn's stream (only explicit /compact goes through the compact flow with its
+    compact_done). The dispatcher must surface it, or the UI's screenshot dedupe keeps
+    pointing the model at an image the compaction summary just dropped."""
+
+    class SystemMessage:
+        def __init__(self, subtype, data=None):
+            self.subtype = subtype
+            self.data = data
+
+    def test_compact_boundary_emits_auto_compacted(self):
+        w = make_worker()
+        w._dispatch(self.SystemMessage(subtype="compact_boundary", data={}), {})
+        assert ("auto_compacted", None) in _drain(w.ui)
+
+    def test_init_does_not_emit_auto_compacted(self):
+        w = make_worker()
+        w._dispatch(self.SystemMessage(subtype="init", data={"session_id": "s1"}), {})
+        assert all(k != "auto_compacted" for k, _ in _drain(w.ui))
+
+
 class TestBuildQuery:
 
     def test_no_images_returns_plain_text(self):
@@ -384,6 +406,26 @@ class TestMakeOptions:
         opts = make_worker()._make_options()
         assert getattr(opts, "extra_args", None) == {"effort": "medium"}
 
+    def test_old_sdk_rejecting_extra_args_drops_only_effort(self, monkeypatch):
+        # An SDK predating extra_args must lose JUST the effort flag (graceful feature
+        # loss), not fail to build options — and the TypeError-droppable loop must pick
+        # extra_args as the victim, leaving model/permissions/mcp intact.
+        monkeypatch.setattr(worker_module, "EFFORT", "high")
+        real_options = worker_module.ClaudeAgentOptions
+
+        def picky(**kwargs):
+            if "extra_args" in kwargs:
+                raise TypeError("__init__() got an unexpected keyword argument 'extra_args'")
+            return real_options(**kwargs)
+
+        monkeypatch.setattr(worker_module, "ClaudeAgentOptions", picky)
+        w = make_worker()
+        opts = w._make_options()
+        assert not getattr(opts, "extra_args", None)
+        assert "extra_args" in w._last_dropped
+        assert opts.model == config.MODEL          # the rest of the options survived
+        assert "AskUserQuestion" in (opts.disallowed_tools or [])
+
 
 # ---------------------------------------------------------------------------
 # 5b. _allow_tool (permission callback / interactive-tool guard)
@@ -545,6 +587,13 @@ class TestModelFamily:
         assert ClaudeWorker._model_family("opus[1m]") == "opus"
         assert ClaudeWorker._model_family("sonnet") == "sonnet"
 
+    def test_fable_is_a_known_family(self):
+        # Without this, _display_model treats "claude-fable-5" (served, suffix-less) and
+        # "claude-fable-5[1m]" (resolved) as DIFFERENT families and defers to the served
+        # id — silently dropping the [1m] badge from the statusline on a 1M session.
+        assert ClaudeWorker._model_family("claude-fable-5[1m]") == "fable"
+        assert ClaudeWorker._model_family("fable") == "fable"
+
     def test_none_and_unknown(self):
         assert ClaudeWorker._model_family(None) == ""
         assert ClaudeWorker._model_family("gpt-9") == "gpt-9"
@@ -576,6 +625,13 @@ class TestDisplayModel:
         w = make_worker()
         w._resolved_model = "claude-opus-4-8"
         assert w._display_model() == "claude-opus-4-8"
+
+    def test_fable_1m_keeps_its_badge(self):
+        # Same reconciliation as Opus: AssistantMessage.model reports the suffix-less id
+        # for a Fable 1M session; the statusline must keep saying [1m].
+        w = make_worker()
+        w._resolved_model = "claude-fable-5[1m]"
+        assert w._display_model(served="claude-fable-5") == "claude-fable-5[1m]"
 
 
 # ---------------------------------------------------------------------------

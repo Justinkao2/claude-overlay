@@ -219,10 +219,18 @@ class Overlay:
         self.pending_images: list = []
         self._precaptured = None        # (shots, monotonic_ts) grabbed while typing
         self._sent_shot_hashes: dict = {}  # capture-target key → sha256 of the last shot
-                                        # SENT for it; lets auto-screenshot skip re-attaching
-                                        # a byte-identical screen (see _dedupe_shots). Cleared
-                                        # whenever the conversation context may have lost the
-                                        # previous image (clear/compact/reconnect/error).
+                                        # the model VERIFIABLY has in context; lets auto-
+                                        # screenshot skip re-attaching a byte-identical screen
+                                        # (see _dedupe_shots). Cleared whenever the context may
+                                        # have lost the image (clear/compact — explicit OR the
+                                        # CLI's automatic one — reconnect, resume fallback,
+                                        # any error).
+        self._pending_shot_hashes: dict = {}  # hashes of shots attached to the IN-FLIGHT turn;
+                                        # promoted into _sent_shot_hashes only when that turn
+                                        # returns a clean result. A turn that errors or is
+                                        # stopped may never have shown the image to the model —
+                                        # committing eagerly would make the next send dedupe
+                                        # against an image the model never saw.
         self._precapture_after = None   # pending debounce timer id
         self._capture_busy = False      # a background precapture grab is in flight
         self._paste_busy = False        # a background clipboard paste is in flight
@@ -3067,9 +3075,12 @@ class Overlay:
         return ("window",) if s.get("window") is not None else ("mon", s.get("index"))
 
     def _dedupe_shots(self, shots):
-        """Split auto-captured shots into (changed, unchanged) against the last SENT hash
-        per target, and remember the hashes of what we're about to send. Any read failure
-        counts as changed — when in doubt, attach (stale context is worse than 1s extra)."""
+        """Split auto-captured shots into (changed, unchanged) against the last hash the
+        model verifiably has, and stage the new hashes as PENDING — they're promoted only
+        when the turn returns a clean result (see _handle "result"/"turn_done"), because a
+        turn that errors out or is stopped may never have delivered the image. Any read
+        failure counts as changed — when in doubt, attach (a stale "unchanged" pointer is
+        worse than 1s extra)."""
         keep, unchanged = [], []
         for s in shots:
             try:
@@ -3081,8 +3092,14 @@ class Overlay:
                 unchanged.append(s)
             else:
                 keep.append(s)
-                self._sent_shot_hashes[self._shot_key(s)] = digest
+                self._pending_shot_hashes[self._shot_key(s)] = digest
         return keep, unchanged
+
+    def _forget_sent_shots(self):
+        """The conversation context can no longer be trusted to contain the previously
+        sent screenshot(s) — attach fresh next time."""
+        self._sent_shot_hashes.clear()
+        self._pending_shot_hashes.clear()
 
     def _inline_text(self, text, shots, images, unchanged=None):
         """Short text companion for inline-image turns: the model sees the images
@@ -3095,8 +3112,10 @@ class Overlay:
             tags = ", ".join(
                 (f"the “{s['window']}” window" if s.get("window") is not None
                  else f"monitor {s['index']}") for s in unchanged)
-            note.append(f"[My screen ({tags}) is UNCHANGED since the screenshot attached "
-                        f"to my previous message — keep using that one.]")
+            note.append(f"[My screen ({tags}) is UNCHANGED since the most recent screenshot "
+                        f"of it earlier in this conversation — keep using that one. If you "
+                        f"no longer have that screenshot in context, say so instead of "
+                        f"guessing.]")
         if shots and shots[0].get("window") is not None:
             note.append(f"[Attached: a live screenshot of my ACTIVE WINDOW only — "
                         f"“{shots[0]['window']}” — not the full screen; other "
@@ -3113,8 +3132,9 @@ class Overlay:
             body = ("Look at the attached screen(s)/image(s) and tell me "
                     "what's there / what I might want help with.")
         else:   # everything was deduped away — point at the context copy instead
-            body = ("Look at my screen (the screenshot from my previous message — "
-                    "it hasn't changed) and tell me what I might want help with.")
+            body = ("Look at my screen (the most recent screenshot earlier in this "
+                    "conversation — it hasn't changed) and tell me what I might want "
+                    "help with.")
         return ("\n".join(note) + "\n\n" + body) if note else body
 
     def _precapture_soon(self, e=None):
@@ -3431,6 +3451,11 @@ class Overlay:
         # (session / turn_done) batch from the turn that was in flight when Clear was
         # clicked would otherwise re-set _session_id and re-persist the discarded record.
         self._discard_pending = True
+        # Forget dedupe state NOW, at click time — not only when reset_done confirms. A
+        # send slipped in between (the worker is busy reconnecting, but the UI isn't busy)
+        # would otherwise dedupe against the discarded conversation and land an
+        # image-less "unchanged" prompt in the brand-new session.
+        self._forget_sent_shots()
         _save_state(last_session=None)
         self.worker.reset()
         self._set_status("resetting…")
@@ -3459,6 +3484,10 @@ class Overlay:
         if self.busy:
             self.add_sys("⏳ Finish (or Stop) the current reply before compacting.")
             return
+        # Forget dedupe state at click time, same reasoning as reset(): a send queued
+        # behind the compaction would otherwise dedupe against images the imminent
+        # summary may drop. (compact_done clears again — that one also covers failures.)
+        self._forget_sent_shots()
         self.worker.compact()
         self._set_status("compacting…")   # instant feedback; the animation starts on ("compacting")
 
@@ -3836,7 +3865,7 @@ class Overlay:
             # baseline. Nulling now would discard that correct value and leave a bare "—".
             self._refresh_statusline()
             self._set_busy(False)
-            self._sent_shot_hashes.clear()   # fresh context has no previous screenshot
+            self._forget_sent_shots()        # fresh context has no previous screenshot
         elif kind == "delta":
             self.add_delta(payload)
         elif kind == "think":
@@ -3854,6 +3883,10 @@ class Overlay:
             self._finish_turn_copy()     # then a Copy button under the reply
             self._set_busy(False)
             self._maybe_flag_done()      # badge the orb if this finished while collapsed
+            # Whatever pending shot hashes weren't promoted by a clean "result" belong to a
+            # turn that ended without one (stopped, errored, transport died) — the model may
+            # never have seen those images, so they must not become dedupe baselines.
+            self._pending_shot_hashes.clear()
             if not self._discard_pending:
                 self._persist_session()  # this conversation is now the resumable one
                                          # (skipped for a turn Cleared mid-flight)
@@ -3873,6 +3906,8 @@ class Overlay:
             self._persist_session()      # keep it resumable even if no new turn follows
         elif kind == "resume_failed":
             self._set_status("")
+            self._forget_sent_shots()    # whatever session we're on, it isn't the one the
+                                         # dedupe cache was describing
             if self._resume_btn is not None:
                 try:
                     self._resume_btn._set_ustate("failed")
@@ -3892,6 +3927,7 @@ class Overlay:
             # optimistic "resumed" so the user isn't told the context is back when it isn't.
             self.add_err("⚠ The previous conversation couldn't be restored after all — the "
                          "CLI started a fresh session, so earlier context isn't available.")
+            self._forget_sent_shots()    # the fresh session has none of the old screenshots
             if self._resume_btn is not None:
                 try:
                     self._resume_btn._set_ustate("failed")
@@ -3904,7 +3940,15 @@ class Overlay:
             self._stop_compact_anim(payload)
             # Compaction may summarize the previous screenshot right out of the context;
             # "screen unchanged, keep using it" would then point at nothing. Attach fresh.
-            self._sent_shot_hashes.clear()
+            self._forget_sent_shots()
+        elif kind == "auto_compacted":
+            # Same as compact_done, but for the CLI's AUTOMATIC mid-stream compaction —
+            # there is no banner/animation for it, only the cache consequence.
+            self._forget_sent_shots()
+        elif kind == "session_replaced":
+            # The worker had to stand up a FRESH session (resume unsupported/failed): the
+            # old context — including every screenshot in it — is gone.
+            self._forget_sent_shots()
         elif kind == "error":
             self.add_err(str(payload))
             self._set_busy(False)
@@ -3912,7 +3956,7 @@ class Overlay:
             # that the worker reconnected into a fresh session. Deliberately coarse: the
             # cost of a wrong clear is one redundant image, the cost of a stale "unchanged"
             # pointer is the model trusting a screenshot it does not have.
-            self._sent_shot_hashes.clear()
+            self._forget_sent_shots()
         elif kind == "result":
             self._md_finalize()          # finalize before any error line is appended
             self._finish_turn_copy()     # Copy button under whatever reply text we did get
@@ -3920,6 +3964,16 @@ class Overlay:
             # our side; surface it WITH the CLI's reason (subtype/result) instead of a generic line.
             if isinstance(payload, dict) and payload.get("is_error"):
                 self.add_err(self._format_turn_error(payload))
+                # This turn's screenshots may never have reached the model — drop their
+                # staged hashes so the next send re-attaches instead of saying "unchanged".
+                # (Hashes already COMMITTED by earlier clean turns stay: an errored turn
+                # doesn't remove images that are already part of the conversation.)
+                self._pending_shot_hashes.clear()
+            else:
+                # Clean result: the model has verifiably seen this turn's images — they
+                # become the dedupe baseline.
+                self._sent_shot_hashes.update(self._pending_shot_hashes)
+                self._pending_shot_hashes.clear()
             self._set_busy(False)
         elif kind == "attach":          # background paste finished (paths, failed_count)
             self._paste_busy = False

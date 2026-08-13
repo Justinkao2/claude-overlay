@@ -17,9 +17,20 @@ per message), and the biggest absolute delay on both sides was reasoning effort
   that is byte-identical to the last one sent for the same monitor/window and tells
   Claude to keep using the copy it already has (the chat shows `🖼 unchanged`). Quick
   follow-ups — the most latency-sensitive messages there are — get their 1–3 seconds
-  back. Cleared whenever the previous image may have left the context (Clear,
-  compaction, any error/reconnect), because a stale "unchanged" pointer would be worse
-  than a redundant image. Manual Snap always attaches.
+  back. Manual Snap (and the legacy `"read"` mode) always attach.
+
+  A stale "screen unchanged" note would be worse than a redundant image — it makes the
+  model trust a screenshot it no longer has — so the dedupe memory is guarded on two
+  fronts (hardened after an external code review of the first cut):
+  - a capture only becomes a dedupe baseline once its turn returns a **clean result** —
+    a turn that errors out or is stopped may never have delivered the image;
+  - the memory is wiped by every event that can cost the context its screenshots:
+    Clear and Compact **at click time** (a send can slip in before they complete), the
+    CLI's **automatic** mid-conversation compaction (which, unlike explicit `/compact`,
+    used to be invisible to the UI), a failed/lost resume, a fresh session standing in
+    for one an old SDK couldn't resume, and any error. And in case some path is still
+    uncovered, the note itself tells the model: if you no longer have that screenshot,
+    say so instead of guessing.
 - **`EFFORT` config knob** — the CLI's `--effort` dial, scoped to the overlay:
   `"low"`…`"max"`, or `""` (default) to keep inheriting your `settings.json`
   `effortLevel`. A global effort tuned for deep terminal work quietly taxes every
