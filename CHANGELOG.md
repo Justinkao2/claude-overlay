@@ -3,7 +3,7 @@
 All notable changes to Claude Overlay are documented here.
 This project follows [Semantic Versioning](https://semver.org/).
 
-## [Unreleased]
+## [1.17.0] - 2026-08-20
 
 Response-speed work, driven by a benchmark of the overlay against the Claude Code CLI
 (same machine, same tasks — trivial replies, a file write, a PowerPoint-COM edit). The
