@@ -40,7 +40,11 @@ LAUNCHER = os.path.join(ROOT, "Start Claude Overlay.cmd")
 # The .cmd files that have to agree about where Python can be found. They are separate
 # scripts on purpose (a user may copy just one out of a ZIP), so the shared block is
 # duplicated text -- and duplicated text is what drifts. See the identity test below.
-SHARES_DISCOVERY = ("Start Claude Overlay.cmd", "Diagnose.cmd", "update.cmd")
+# setup.cmd joined in v1.16.2: it was the one script answering the question its own way
+# (`py -3` from the REGISTRY, then a PATH `python`, then the scan), so on a machine where
+# that search and the launcher's disagreed it installed every package into an interpreter
+# the launcher never runs -- and its closing preflight proved the wrong Python loads.
+SHARES_DISCOVERY = ("Start Claude Overlay.cmd", "Diagnose.cmd", "update.cmd", "setup.cmd")
 BEGIN = "rem ---- BEGIN find-pythonw"
 END = "rem ---- END find-pythonw"
 
@@ -175,6 +179,51 @@ def test_the_launcher_never_decides_usability_from_a_different_binary():
                 continue
             assert "pythonw.exe=python.exe" not in line, (
                 f"{name}:{lineno} judges pythonw by the python.exe beside it")
+
+
+def test_setup_consults_no_other_python_before_the_launchers_own_search():
+    """The v1.16.1 field failure, pinned. setup.cmd used to ask "is any Python on this
+    PC?" -- `py -3` (which reads the REGISTRY, PEP 514) first, then a PATH `python` --
+    while the launcher asks `where pythonw` and then scans. On a managed machine holding
+    both a registry-registered Python that PATH never mentions AND the standalone tree
+    setup itself installs, every `pip install` went into the first and the launcher ran
+    the second: the next double-click died on `import PIL` with both packages "not
+    installed", right after setup printed "[OK] The app loads." about the wrong Python.
+    So the PATH/py-launcher forms may appear only BELOW the shared block, as fallbacks
+    for the one case where the launcher itself would fall back to them."""
+    text = read("setup.cmd")
+    above = [l for l in text[:text.index(BEGIN)].splitlines()
+             if not l.lstrip().startswith("rem ")]
+    for probe in ("py -3", "call python"):
+        offenders = [l.strip() for l in above if probe in l]
+        assert not offenders, (
+            f"setup.cmd consults {probe!r} before the launcher's own search, so pip can "
+            "target an interpreter the launcher will never run:\n" + "\n".join(offenders))
+
+
+def test_setup_can_fall_back_to_pythonw_itself():
+    """Same property test_update_can_fall_back_to_pythonw_itself pins for update.cmd, in
+    setup.cmd's delayed-expansion-free spelling: the sibling python.exe is a preference
+    (readable pip output), never a requirement -- when it does not run, the launcher's
+    own pythonw is still the right environment to install into."""
+    body = [l for l in read("setup.cmd").splitlines() if not l.lstrip().startswith("rem ")]
+    sibling_line = next(i for i, l in enumerate(body) if "pythonw.exe=python.exe" in l)
+    later = "\n".join(body[sibling_line:])
+    assert 'if not defined PY if defined PYW set PY="%PYW%"' in later, (
+        "setup.cmd derives the sibling python.exe but has no fallback to pythonw")
+
+
+def test_setup_proves_the_app_loads_with_the_interpreter_it_installed_into():
+    """The false green that hid the defect above: setup's closing `preflight.py` run must
+    use %PY% -- the interpreter the packages just went into and the launcher will run --
+    not some other Python that happens to answer on PATH. Structural, because on any
+    one-Python machine every alternative passes for the wrong reason."""
+    checks = [l.strip() for l in read("setup.cmd").splitlines()
+              if "preflight.py" in l and not l.lstrip().startswith("rem ")]
+    assert checks, "setup.cmd no longer proves the app loads before claiming success"
+    for line in checks:
+        assert line.startswith("call %PY%"), (
+            f"setup.cmd verifies the app with something other than %PY%: {line}")
 
 
 def test_update_does_not_run_git_pull_from_the_file_git_is_replacing():

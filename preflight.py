@@ -61,16 +61,36 @@ def repo_dir():
     return os.path.dirname(os.path.abspath(__file__))
 
 
+def _console_twin(interpreter):
+    """The python.exe sitting NEXT TO a pythonw.exe — same install, same site-packages,
+    but WITH a console. The app runs under pythonw, so sys.executable here usually IS
+    pythonw — and advice that says "run pythonw -m pip ..." is advice nobody can follow:
+    pythonw shows no window and prints nothing, so to the person pasting the command the
+    fix itself looks broken. When the interpreter isn't pythonw, or the sibling isn't
+    there, the interpreter itself is still the right target — a silent install into the
+    right Python beats a visible one into the wrong Python."""
+    try:
+        if os.path.basename(interpreter).lower() == "pythonw.exe":
+            cand = os.path.join(os.path.dirname(interpreter), "python.exe")
+            if os.path.isfile(cand):
+                return cand
+    except Exception:                                          # pragma: no cover - defensive
+        pass
+    return interpreter
+
+
 def pip_command(interpreter=None):
-    """The install command for THIS interpreter. Spelled with sys.executable rather than
+    """The install command for THIS interpreter. Spelled with a full path rather than
     a bare `pip`, because "I already installed it" almost always means "into the other
-    Python" — this is the only form that can't land in the wrong one.
+    Python" — this is the only form that can't land in the wrong one. The path is the
+    console twin of the interpreter (see _console_twin): same environment, visible output.
 
     Installs from requirements.txt rather than naming the packages, so following this
     advice cannot land a version the app was never tested against. Naming them here is how
     the pinned file ended up constraining nobody."""
     return '"%s" -m pip install --upgrade -r "%s"' % (
-        interpreter or sys.executable, os.path.join(repo_dir(), "requirements.txt"))
+        _console_twin(interpreter or sys.executable),
+        os.path.join(repo_dir(), "requirements.txt"))
 
 
 def required_sdk_symbols():
@@ -105,19 +125,51 @@ def _dist_version(dist):
         return None
 
 
-def launcher_python():
-    """The interpreter "Start Claude Overlay.cmd" will actually run the app with, i.e.
-    the python.exe next to the `pythonw` it finds on PATH — or None if there isn't one.
+def _scan_programs_python(filename, _depth=6):
+    """The launcher's SECOND candidate source, emulated: the first `filename` found under
+    %LOCALAPPDATA%\\Programs\\Python — the folder setup.cmd installs into — walking the
+    way `dir /b /s /a-d /o-n` walks it (descending name order, files of a directory
+    before its subdirectories). The launcher probes each candidate by running it; this
+    feeds a WARN, so existing is enough. Depth-capped because uv creates junctions in
+    that tree and a cyclic one would otherwise walk forever."""
+    root = os.path.join(os.environ.get("LOCALAPPDATA") or "", "Programs", "Python")
 
-    This is the answer to the most misleading class of report there is: the packages ARE
-    installed, `pip list` proves it, and the app still won't start, because they went
-    into a different Python from the one that launches it."""
+    def first(d, depth):
+        if depth <= 0:
+            return None
+        try:
+            entries = sorted(os.listdir(d), key=str.lower, reverse=True)
+        except OSError:
+            return None
+        cand = os.path.join(d, filename)
+        if any(e.lower() == filename for e in entries) and os.path.isfile(cand):
+            return cand
+        for e in entries:
+            sub = os.path.join(d, e)
+            if os.path.isdir(sub):
+                hit = first(sub, depth - 1)
+                if hit:
+                    return hit
+        return None
+
+    return first(root, _depth) if os.path.isdir(root) else None
+
+
+def launcher_python():
+    """The interpreter "Start Claude Overlay.cmd" will actually run the app with, found
+    the way the LAUNCHER finds it: `where pythonw` first, then the scan of the folder
+    setup.cmd installs into — or None when neither knows of one. PATH alone used to be
+    the whole search here, which kept this check silent on exactly the machines
+    setup.cmd provisions: their Python is never on PATH, so the one mismatch this line
+    exists to catch ("packages installed, app still won't start") went unreported.
+
+    Returns the console twin (the python.exe beside that pythonw) when it exists,
+    because every caller builds runnable advice out of the answer."""
     import shutil
-    pyw = shutil.which("pythonw")
+    pyw = shutil.which("pythonw") or _scan_programs_python("pythonw.exe")
     if not pyw:
         return None
-    cand = os.path.join(os.path.dirname(pyw), "python.exe")
-    return cand if os.path.isfile(cand) else None
+    return _console_twin(pyw)
 
 
 def _same_interpreter(a, b):
@@ -216,8 +268,12 @@ def check():
     # Reported as a WARN, not a FAIL: this report may legitimately be run by a different
     # interpreter than the launcher uses. But when everything above looks fine and the
     # app still won't start, this line is usually the whole answer.
+    # Both sides are normalised to their console twin first: the launcher answer already
+    # is one, and a report RUN under pythonw (Diagnose.cmd does exactly that) would
+    # otherwise compare pythonw.exe against the python.exe beside it — two file names,
+    # one environment — and cry "two Pythons" on every perfectly healthy machine.
     launcher = launcher_python()
-    if launcher and not _same_interpreter(launcher, sys.executable):
+    if launcher and not _same_interpreter(launcher, _console_twin(sys.executable)):
         problems.append(Problem(
             WARN, "two-pythons",
             "this report is about a DIFFERENT Python from the one that launches the "

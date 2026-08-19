@@ -195,6 +195,60 @@ def test_fix_commands_name_this_interpreter():
     assert sys.executable in preflight.pip_command()
 
 
+def test_fix_commands_swap_pythonw_for_its_console_twin(tmp_path):
+    """The startup dialog is produced UNDER pythonw, so sys.executable there IS pythonw —
+    and a `pythonw -m pip ...` fix opens no window and prints nothing, which to the person
+    pasting it reads as "the fix is broken too" (reported from the field, screenshot and
+    all). The advice must name the python.exe beside it: same install, same
+    site-packages, visible output."""
+    pyw = tmp_path / "pythonw.exe"
+    twin = tmp_path / "python.exe"
+    pyw.write_bytes(b"")
+    twin.write_bytes(b"")
+    cmd = preflight.pip_command(str(pyw))
+    assert str(twin) in cmd
+    assert "pythonw.exe" not in cmd
+
+
+def test_fix_commands_keep_pythonw_when_it_is_all_there_is(tmp_path):
+    """A SILENT install into the right Python still beats a visible one into the wrong
+    Python, so a pythonw with no python.exe sibling stays the target."""
+    pyw = tmp_path / "pythonw.exe"
+    pyw.write_bytes(b"")
+    assert str(pyw) in preflight.pip_command(str(pyw))
+
+
+def test_launcher_python_scans_where_setup_installs(monkeypatch, tmp_path):
+    """PATH is not the whole world: on the machines setup.cmd provisions, the interpreter
+    lives ONLY under %LOCALAPPDATA%\\Programs\\Python, and the launcher finds it by
+    scanning. A launcher_python that stopped at PATH kept the two-pythons warning silent
+    on exactly those machines — the one mismatch it exists to catch."""
+    import shutil
+    tree = tmp_path / "Programs" / "Python" / "cpython-3.12-windows-x86_64-none"
+    tree.mkdir(parents=True)
+    (tree / "pythonw.exe").write_bytes(b"")
+    (tree / "python.exe").write_bytes(b"")
+    monkeypatch.setenv("LOCALAPPDATA", str(tmp_path))
+    monkeypatch.setattr(shutil, "which", lambda name: None)
+
+    got = preflight.launcher_python()
+    assert got is not None
+    assert os.path.normcase(got) == os.path.normcase(str(tree / "python.exe"))
+
+
+def test_no_two_pythons_warning_when_the_report_runs_under_pythonw(monkeypatch, tmp_path):
+    """Diagnose.cmd runs this report under the launcher's own pythonw. pythonw.exe and
+    the python.exe beside it are two file names for ONE environment; calling that "two
+    Pythons" on every healthy machine would teach people to ignore the warning."""
+    pyw = tmp_path / "pythonw.exe"
+    twin = tmp_path / "python.exe"
+    pyw.write_bytes(b"")
+    twin.write_bytes(b"")
+    monkeypatch.setattr(preflight, "launcher_python", lambda: str(twin))
+    monkeypatch.setattr(sys, "executable", str(pyw))
+    assert not [p for p in preflight.check() if p.key == "two-pythons"]
+
+
 def test_summary_reports_only_blocking_problems():
     probs = [preflight.Problem(preflight.WARN, "w", "just a warning"),
              preflight.Problem(preflight.FAIL, "f", "the blocker", "do this")]

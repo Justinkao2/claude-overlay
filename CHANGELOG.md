@@ -45,6 +45,40 @@ per message), and the biggest absolute delay on both sides was reasoning effort
 - `claude -p` (headless) can silently run the **org default model instead of your
   `settings.json` pin** — pin with `--model` when benchmarking anything.
 
+### Fixed
+- **`setup.cmd` could install every package into a Python the launcher never runs.**
+  Reported from a managed corporate PC: after updating to 1.16.1 the app died at startup
+  with `No module named 'PIL'` and BOTH packages "metadata says not installed" — right
+  after the scripts had reported success. `setup.cmd` answered "is any Python on this
+  PC?" with its own search — `py -3` (the *registry*, PEP 514) first, then a PATH
+  `python`, then the folder scan — while the launcher asks `where pythonw` and then
+  scans `%LOCALAPPDATA%\Programs\Python`. On a machine holding both a
+  registry-registered Python that PATH never mentions (an Anaconda, an old python.org
+  install) and the standalone tree setup itself provisions, pip fed the first and the
+  launcher ran the second — and setup's closing "[OK] The app loads." was proven against
+  the wrong interpreter too, so every screen said success while the next double-click
+  crashed. `setup.cmd` now finds Python with the launcher's own search block (kept
+  byte-identical across all four `.cmd` files — a test compares them, and two more pin
+  the order and the fallback) and installs into what it finds.
+- **The startup dialog's fix command could not be followed.** It named the interpreter
+  that was running — `pythonw.exe`, which opens no window and prints nothing, so to the
+  person pasting it the fix looked broken too. The advice now names the `python.exe`
+  beside it (same install, same site-packages, visible output), and the dialog leads
+  with the fix that needs no terminal at all: double-click `update.cmd` (or
+  `setup.cmd`), either of which repairs the environment and re-proves the app loads.
+- **The "two Pythons" warning was silent on exactly the machines it exists for.**
+  preflight's launcher-interpreter lookup stopped at PATH, but on the machines
+  `setup.cmd` provisions Python lives only under `%LOCALAPPDATA%\Programs\Python` — so
+  the one mismatch the warning was written to catch went unreported there. It now scans
+  that folder the way the launcher does. Also, a report run under pythonw (which is how
+  `Diagnose.cmd` runs it) no longer counts `pythonw.exe` and the `python.exe` beside it
+  as two different Pythons.
+- **`update.cmd` now bootstraps pip with ensurepip** the way `setup.cmd` always has. On
+  a hand-dropped Python without pip (offline `README.md` route B blesses exactly that),
+  the refresh failed with "No module named pip" and "run Update again" was a wall.
+
+## [1.16.1] - 2026-08-12
+
 Hardening for the Python-install path that 1.16.0 introduced, from a post-release
 review. No new features; if 1.16.0 installed Python for you, nothing changes.
 

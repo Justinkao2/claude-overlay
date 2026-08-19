@@ -145,7 +145,7 @@ rem can install a Python and then has to look again. `set "PYW="` clears the sta
 rem answer comes from re-measuring rather than from whatever setup.cmd said about itself.
 :findpython
 
-rem ---- BEGIN find-pythonw (kept identical in Diagnose.cmd and update.cmd) ----
+rem ---- BEGIN find-pythonw (kept identical in Diagnose.cmd, update.cmd and setup.cmd) ----
 set "PYW="
 for /f "usebackq delims=" %%i in (`where pythonw 2^>nul`) do if not defined PYW (call "%%i" -c "pass" >nul 2>nul && set "PYW=%%i")
 if not defined PYW for /f "delims=" %%p in ('dir /b /s /a-d /o-n "%LOCALAPPDATA%\Programs\Python\pythonw.exe" 2^>nul') do if not defined PYW (call "%%p" -c "pass" >nul 2>nul && set "PYW=%%p")
@@ -242,6 +242,16 @@ rem offline\README.md route B blesses exactly that. Re-establish the invariant h
 rem run, scoped to the folder the overlay owns (a system/conda interpreter elsewhere on
 rem PATH keeps its marker) -- same sweep install-python.ps1 performs after a uv install.
 for /f "delims=" %%e in ('dir /b /s /a-d "%LOCALAPPDATA%\Programs\Python\EXTERNALLY-MANAGED" 2^>nul') do del /f /q "%%e" >nul 2>nul
+rem A tree without pip cannot be refreshed BY pip, and `%PY% -m pip` then fails with
+rem "No module named pip" -- which the error text below would misread as a package
+rem problem. setup.cmd has bootstrapped pip via ensurepip since it existed; this half
+rem never did, so on a hand-dropped Python (offline\README.md route B blesses exactly
+rem that) "run Update again" was a wall however many times it was tried.
+call %PY% -m pip --version >nul 2>nul
+if errorlevel 1 (
+  echo pip is missing from this Python - bootstrapping it with ensurepip ...
+  call %PY% -m ensurepip --upgrade
+)
 echo Refreshing Python packages with !PY! ...
 call %PY% -m pip install --upgrade -r "%~dp0requirements.txt"
 rem An interrupted or proxy-blocked upgrade can leave a package UNINSTALLED - pip

@@ -6,44 +6,71 @@ echo   Claude Overlay - setup
 echo ============================================================
 echo.
 
-rem --- 1. Python (must be a REAL interpreter, not the Microsoft Store alias) ---
-rem `where python` is NOT enough: Windows 11 ships a 0-byte "App execution alias"
-rem stub at %LOCALAPPDATA%\Microsoft\WindowsApps\python.exe that `where` finds even
-rem when Python is NOT installed -- running it just prints "Python was not found..."
-rem and exits 9009. So VERIFY by actually running --version, and prefer the `py`
-rem launcher (which the Store alias never shadows).
-rem Goto-structured (NOT nested parentheses) on purpose: a parenthesized block expands
-rem %PY%/%DOPY% at parse time, so a value set by `set /p` inside it would read stale. Labels
-rem let each line expand when reached.
+rem --- 1. Python: THE interpreter the launcher will run, found the way IT finds it ---
+rem This section used to answer a different question ("is any Python on this PC?") with a
+rem different search: `py -3` (the REGISTRY, PEP 514) first, then a PATH `python`, then the
+rem folder scan -- while "Start Claude Overlay.cmd" asks `where pythonw` (PATH) first and
+rem then scans. On a machine where those two searches disagree -- say a registry-registered
+rem Anaconda or an old python.org install that was never added to PATH, next to the
+rem standalone tree this script installs under %LOCALAPPDATA%\Programs\Python\ -- every
+rem package below went into an interpreter the launcher never runs, and the preflight at
+rem the end of this file then proved THE WRONG PYTHON loads: setup printed "[OK] The app
+rem loads." and the next double-click died on `import PIL` with both packages reported
+rem "not installed". Nothing on screen connected the two.
+rem So the search below is the launcher's own, byte for byte (the marked block is kept
+rem identical across the four .cmd files -- a test compares them), and only after it comes
+rem the sibling python.exe swap for readable pip output, exactly as update.cmd does it.
+rem Still goto-structured (NOT nested parentheses): a parenthesized block expands
+rem %PY%/%DOPY% at parse time, so a value set by `set /p` inside it would read stale --
+rem and this file deliberately runs WITHOUT delayed expansion (its `[!]` notices depend
+rem on that), so the swap goes through `call set` instead of `!PYW:...!`.
+rem PYTRIED is cleared, not trusted: a value inherited from the calling environment would
+rem skip the install offer on the very first pass -- update.cmd documents the same trap.
+set "PYTRIED="
+
+:findpython
+
+rem ---- BEGIN find-pythonw (kept identical in Diagnose.cmd, update.cmd and setup.cmd) ----
+set "PYW="
+for /f "usebackq delims=" %%i in (`where pythonw 2^>nul`) do if not defined PYW (call "%%i" -c "pass" >nul 2>nul && set "PYW=%%i")
+if not defined PYW for /f "delims=" %%p in ('dir /b /s /a-d /o-n "%LOCALAPPDATA%\Programs\Python\pythonw.exe" 2^>nul') do if not defined PYW (call "%%p" -c "pass" >nul 2>nul && set "PYW=%%p")
+if not defined PYW for /d %%d in ("%ProgramFiles%\Python3*") do if not defined PYW (call "%%d\pythonw.exe" -c "pass" >nul 2>nul && set "PYW=%%d\pythonw.exe")
+if not defined PYW for /d %%d in ("%SystemDrive%\Python3*") do if not defined PYW (call "%%d\pythonw.exe" -c "pass" >nul 2>nul && set "PYW=%%d\pythonw.exe")
+rem ---- END find-pythonw ----
+
+rem pip's output is invisible under pythonw (no console), so drive everything below with
+rem the python.exe BESIDE the launcher's pythonw when that one also runs -- same install,
+rem same site-packages, readable output -- and with pythonw itself when it does not.
+rem Only when NO pythonw exists anywhere does the launcher itself fall back to a console
+rem `python`, so only then may the PATH/py-launcher forms decide where the packages go.
 set "PY="
-call py -3 --version >nul 2>nul && set "PY=py -3"
-if not defined PY ( call python --version >nul 2>nul && set "PY=python" )
-rem Look where this script installs, BEFORE offering to install again: a previous run may
-rem have put Python in %LOCALAPPDATA%\Programs\Python\ without PATH ever catching up.
-if not defined PY for /f "delims=" %%p in ('dir /b /s /a-d /o-n "%LOCALAPPDATA%\Programs\Python\python.exe" 2^>nul') do if not defined PY (call "%%p" --version >nul 2>nul && set PY="%%p")
+set "SIB="
+if defined PYW call set "SIB=%%PYW:pythonw.exe=python.exe%%"
+if defined SIB call "%SIB%" -c "pass" >nul 2>nul && set PY="%SIB%"
+if not defined PY if defined PYW set PY="%PYW%"
+if not defined PY ( call py -3 -c "pass" >nul 2>nul && set "PY=py -3" )
+if not defined PY ( call python -c "pass" >nul 2>nul && set "PY=python" )
+if not defined PY for /f "delims=" %%p in ('dir /b /s /a-d /o-n "%LOCALAPPDATA%\Programs\Python\python.exe" 2^>nul') do if not defined PY (call "%%p" -c "pass" >nul 2>nul && set PY="%%p")
 if defined PY goto pyfound
 
+if defined PYTRIED goto pymanual
 echo [X] Python 3 was not found on this PC.
 echo     ^(The Microsoft Store "python" shortcut does NOT count as a real install.^)
 set "DOPY=Y"
 set /p DOPY="Install Python 3 now, automatically? (recommended) [Y/n] "
-if /i "%DOPY%"=="n" goto pymanual
+rem First character only, so "no" is a refusal too and not an unrecognised answer that
+rem gets read as consent. Enter leaves DOPY as the default Y.
+if /i "%DOPY:~0,1%"=="n" goto pymanual
 echo.
 echo Installing Python 3 ^(per-user, no admin needed^) -- this can take a minute...
 powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0install-python.ps1"
 echo.
-rem Re-detect. The PATH is NOT refreshed inside this window, so after the install also look in
-rem the per-user dir where winget / the python.org installer place Python.
-set "PY="
-call py -3 --version >nul 2>nul && set "PY=py -3"
-if not defined PY ( call python --version >nul 2>nul && set "PY=python" )
-if defined PY goto pyfound
-rem (recurse from Programs\Python for python.exe -- a wildcard MID-path like Python3*\python.exe
-rem  is NOT matched by `dir /s`, so search the base dir for the filename instead. Probe each
-rem  hit like the pre-install scan above does: a half-installed or policy-blocked python.exe
-rem  taken on faith here would feed a dead %PY% to pip and preflight below.)
-for /f "delims=" %%p in ('dir /b /s /a-d /o-n "%LOCALAPPDATA%\Programs\Python\python.exe" 2^>nul') do if not defined PY (call "%%p" --version >nul 2>nul && set PY="%%p")
-if defined PY goto pyfound
+rem Re-measure with the SAME search rather than re-detecting some other way: the PATH in
+rem this window is stale for its whole life, which is exactly why the shared block scans
+rem %LOCALAPPDATA%\Programs\Python\ -- where install-python.ps1 just put the interpreter.
+set "PYTRIED=1"
+echo Re-checking for Python ...
+goto findpython
 
 :pymanual
 echo.
@@ -67,6 +94,9 @@ call %PY% --version > "%TEMP%\_ov_pyver.txt" 2>&1
 set "PYVER="
 set /p PYVER=<"%TEMP%\_ov_pyver.txt"
 del "%TEMP%\_ov_pyver.txt" >nul 2>nul
+rem A pythonw without a python.exe sibling prints nothing at all (no console), and an
+rem empty "()" here reads like something broke when nothing did.
+if not defined PYVER set "PYVER=version not printable: pythonw has no console"
 echo [OK] Python found: %PY% ^(%PYVER%^)
 
 rem --- 2. claude CLI (auto-install via the native installer if missing; no Node needed) ---

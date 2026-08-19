@@ -73,6 +73,13 @@ def _report_import_failure(exc):
         detail = preflight.summary(preflight.check()) + "\n\n"
     except Exception:
         pass
+    # Ahead of the traceback, because the dialog is capped and read top-down: the person
+    # seeing it is not the person who can use a stack trace, and the per-problem pip
+    # commands above still assume a terminal. The two double-clickable files repair the
+    # environment AND prove the app loads before claiming success — so name them first.
+    detail += ("Quickest fix: double-click update.cmd (or setup.cmd) in the app folder - "
+               "either one reinstalls what is missing into the Python the launcher "
+               "actually runs, and verifies the app loads before reporting success.\n\n")
     try:
         import traceback as _tb
         detail += "".join(_tb.format_exception(type(exc), exc, exc.__traceback__))

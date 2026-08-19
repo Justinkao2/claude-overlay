@@ -27,7 +27,7 @@ rem PATH is not the whole world either: setup.cmd installs into
 rem %LOCALAPPDATA%\Programs\Python\Python3xx\ and finds it there by scanning, so this
 rem report has to look in the same folders the launcher now looks in. Reporting "no
 rem Python" about a machine that has one is the same failure as refusing to launch on it.
-rem ---- BEGIN find-pythonw (kept identical in Diagnose.cmd and update.cmd) ----
+rem ---- BEGIN find-pythonw (kept identical in Diagnose.cmd, update.cmd and setup.cmd) ----
 set "PYW="
 for /f "usebackq delims=" %%i in (`where pythonw 2^>nul`) do if not defined PYW (call "%%i" -c "pass" >nul 2>nul && set "PYW=%%i")
 if not defined PYW for /f "delims=" %%p in ('dir /b /s /a-d /o-n "%LOCALAPPDATA%\Programs\Python\pythonw.exe" 2^>nul') do if not defined PYW (call "%%p" -c "pass" >nul 2>nul && set "PYW=%%p")
