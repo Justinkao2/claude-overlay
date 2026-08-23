@@ -529,3 +529,160 @@ def test_apply_permission_mode_persists_confirmed_choice(overlay, monkeypatch, t
     assert co._load_state().get("read_only") is True
     overlay._apply_permission_mode("acceptEdits")
     assert co._load_state().get("read_only") is False
+
+
+# ── mode chips ────────────────────────────────────────────────────────────────
+#
+# Read-only / Window-only / Shareable live behind the ⚙ menu, so their state used to be
+# invisible without opening it (the gear colour covered Read-only alone). The strip shows a
+# chip per mode that is NOT at its quiet default, so a stock overlay stays uncluttered --
+# which is why the old always-on inline toggles were removed in the first place.
+
+@pytest.fixture
+def modes(overlay):
+    """Set the three mode flags directly and restore them after. Direct assignment on
+    purpose: toggle_read_only() only flips once the worker confirms, and these tests are
+    about what the bar DRAWS for a given state, not about how the state gets there."""
+    saved = {k: getattr(overlay, k) for k in overlay.MODE_CHIPS}
+
+    def apply(**kw):
+        for k in overlay.MODE_CHIPS:
+            setattr(overlay, k, kw.get(k, False))
+        overlay._paint_gear()          # what every toggle handler ends up calling
+        overlay.root.update_idletasks()
+        return overlay
+
+    # The fixture's bar has no real width, so the terse/full decision would swing on layout
+    # noise. Pin it to the roomy branch; the narrow branch has its own tests below.
+    overlay._modes_fit = lambda labels: True
+
+    yield apply
+    del overlay._modes_fit
+    for k, v in saved.items():
+        setattr(overlay, k, v)
+    overlay._paint_gear()
+
+
+def _packed_chips(ov):
+    """Chip texts actually on the status bar, in left-to-right bar order."""
+    lbls = set(ov.mode_lbls.values())
+    return [w.cget("text") for w in ov.status_frame.pack_slaves()
+            if w in lbls and w.winfo_manager() == "pack"]
+
+
+def test_no_mode_chips_when_everything_is_default(modes):
+    """A stock overlay shows an empty strip -- the whole point of chipping only deviations."""
+    ov = modes()
+    assert _packed_chips(ov) == [], f"stock overlay is showing chips: {_packed_chips(ov)!r}"
+
+
+@pytest.mark.parametrize("key", ["read_only", "window_shot", "share_visible"])
+def test_each_mode_shows_its_own_chip(modes, key):
+    ov = modes(**{key: True})
+    g, lbl, _c, _w = ov.MODE_CHIPS[key]
+    expected = f"{g} {lbl}"
+    assert _packed_chips(ov) == [expected], f"got {_packed_chips(ov)!r}"
+
+
+def test_read_only_chip_takes_the_accent_colour(modes):
+    """Read-only is the safety state, so it gets the accent -- the same signal the gear
+    colour already carries. The other two are informational and stay muted."""
+    import claude_overlay as co
+    ov = modes(read_only=True, window_shot=True)
+    assert ov.mode_lbls["read_only"].cget("fg") == co.T["accent"]
+    assert ov.mode_lbls["window_shot"].cget("fg") == co.T["muted"]
+
+
+def test_all_three_chips_keep_a_stable_order(modes):
+    """Chips are re-packed in MODE_CHIPS order, so how you switched them on cannot shuffle
+    the bar. Turning them on in reverse must still read left-to-right the same way."""
+    ov = modes(read_only=True, window_shot=True, share_visible=True)
+    forward = _packed_chips(ov)
+    assert len(forward) == 3, f"expected all three chips, got {forward!r}"
+
+    modes()                                   # all off
+    ov = modes(share_visible=True)            # ...then on in the opposite order
+    modes(share_visible=True, window_shot=True)
+    ov = modes(share_visible=True, window_shot=True, read_only=True)
+    assert _packed_chips(ov) == forward, f"order shifted: {_packed_chips(ov)!r} vs {forward!r}"
+
+
+def test_turning_a_mode_off_removes_its_chip(modes):
+    ov = modes(read_only=True, window_shot=True)
+    assert len(_packed_chips(ov)) == 2
+    ov = modes(window_shot=True)
+    g, lbl, _c, _w = ov.MODE_CHIPS["window_shot"]
+    assert _packed_chips(ov) == [f"{g} {lbl}"], f"got {_packed_chips(ov)!r}"
+
+
+def test_mode_chips_sit_before_the_attachment_label(modes):
+    """The strip belongs next to the ⚙ it explains, not after the 📎 count."""
+    ov = modes(read_only=True)
+    order = ov.status_frame.pack_slaves()
+    assert order.index(ov.mode_lbls["read_only"]) < order.index(ov.attach_lbl)
+
+
+@pytest.mark.parametrize("painter", ["_paint_window_toggle", "_paint_share_toggle",
+                                     "_paint_ro_toggle"])
+def test_every_toggle_painter_refreshes_the_strip(modes, painter):
+    """Each toggle handler calls its own painter, and all three funnel into _paint_gear.
+    If that chain breaks, a flipped mode would leave a stale chip on the bar."""
+    ov = modes()
+    assert _packed_chips(ov) == []
+    ov.read_only = True
+    getattr(ov, painter)()
+    ov.root.update_idletasks()
+    assert len(_packed_chips(ov)) == 1, (
+        f"{painter}() did not refresh the mode strip")
+
+
+def test_modes_fit_assumes_room_before_layout(overlay):
+    """Width is 1 until Tk has laid the bar out. Guessing 'no room' there would flash the
+    terse chips on every start; the <Configure> that follows re-decides with a real width."""
+    overlay.status_frame.winfo_width = lambda: 1
+    try:
+        assert overlay._modes_fit(["⊘ Read-only"]) is True
+    finally:
+        del overlay.status_frame.winfo_width
+
+
+def test_modes_fit_says_no_on_a_narrow_bar(overlay):
+    """A bar too narrow for the spelled-out chips reports no room."""
+    labels = [f"{g} {l}" for g, l, _c, _w in overlay.MODE_CHIPS.values()]
+    overlay.status_frame.winfo_width = lambda: 120
+    try:
+        assert overlay._modes_fit(labels) is False
+        overlay.status_frame.winfo_width = lambda: 4000
+        assert overlay._modes_fit(labels) is True
+    finally:
+        del overlay.status_frame.winfo_width
+
+
+def test_narrow_bar_falls_back_to_glyph_only(modes, monkeypatch):
+    """When the words do not fit, chips shrink to their glyph instead of being clipped off
+    the edge of the bar -- a dropped chip would report the mode as OFF, which is worse than
+    terse. The glyphs stay clickable and the ⚙ menu still spells everything out."""
+    ov = modes(read_only=True, window_shot=True, share_visible=True)
+    # Pin the width decision rather than trusting the fixture's bar to be wide: assert the
+    # full form first so this test proves the fallback CHANGES something.
+    monkeypatch.setattr(ov, "_modes_fit", lambda labels: True)
+    ov._paint_modes()
+    assert all(" " in t for t in _packed_chips(ov)), "with room, chips should spell the mode out"
+
+    monkeypatch.setattr(ov, "_modes_fit", lambda labels: False)
+    ov._paint_modes()
+    ov.root.update_idletasks()
+
+    glyphs = [g for g, _l, _c, _w in ov.MODE_CHIPS.values()]
+    assert _packed_chips(ov) == glyphs, f"expected glyph-only chips, got {_packed_chips(ov)!r}"
+
+
+def test_glyph_only_chips_keep_their_colours(modes, monkeypatch):
+    """Shrinking to glyphs must not cost Read-only its accent -- the terse form is exactly
+    when the colour is doing most of the work."""
+    import claude_overlay as co
+    ov = modes(read_only=True, window_shot=True)
+    monkeypatch.setattr(ov, "_modes_fit", lambda labels: False)
+    ov._paint_modes()
+    assert ov.mode_lbls["read_only"].cget("fg") == co.T["accent"]
+    assert ov.mode_lbls["window_shot"].cget("fg") == co.T["muted"]
