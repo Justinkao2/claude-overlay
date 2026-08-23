@@ -265,6 +265,10 @@ class Overlay:
         # several turn_done/result events emitting more than one button per assistant turn.
         self._turn_raw = ""
         self._turn_copy_added = False
+        # Each user bubble owns its own canvas, and canvas text selection is per-canvas, so
+        # nothing clears bubble A when you start selecting in bubble B. Track the bubble that
+        # currently holds a selection and clear it by hand, or old highlights pile up.
+        self._sel_bubble = None
         self._last_pump = time.monotonic()   # hang-watchdog heartbeat
         self._pump_logged = 0.0              # throttle the periodic "pump alive" debug line
         self._drag = (0, 0)
@@ -892,6 +896,9 @@ class Overlay:
         self.chat.configure(yscrollcommand=self._sb_set)
         self.chat.bind("<MouseWheel>", self._on_wheel)
         self.chat.bind("<Key>", self._readonly_keys)
+        # Starting a selection in the transcript drops any user-bubble highlight, so the window
+        # never shows two selections at once. add="+" so Text's own click bindings still run.
+        self.chat.bind("<Button-1>", lambda e: self._bubble_sel_clear(), add="+")
         self.chat.bind("<Configure>", self._on_chat_configure, add="+")
         self._build_jump()
 
@@ -1131,6 +1138,21 @@ class Overlay:
                                    font=self.f_small, cursor="hand2")
         self.attach_lbl.pack(side="left", padx=self.px(6), pady=pad)
         self.attach_lbl.bind("<Button-1>", lambda e: self._clear_attachments())
+        # Mode chips sit between the ⚙ and the attachment label (hence `before=` in
+        # _paint_modes). One per setting that is NOT at its quiet default, so the strip is
+        # empty on a stock overlay and anything visible means "this one is behaving
+        # differently" — the reason the old always-on inline toggles were removed was that
+        # they crowded the bar even when they had nothing to say. The ⚙ menu still spells
+        # all three out with checkmarks; clicking a chip opens it.
+        self.mode_lbls = {}
+        for key in self.MODE_CHIPS:
+            lbl = tk.Label(st, bg=T["bg"], font=self.f_small, cursor="hand2")
+            lbl.bind("<Button-1>", self._gear_menu)
+            self.mode_lbls[key] = lbl
+        # Resizing changes whether the spelled-out chips still fit, so re-decide on every
+        # layout pass. add="+" leaves any other <Configure> handler on the bar intact.
+        st.bind("<Configure>", self._paint_modes, add="+")
+        self._paint_modes()
         self.grip = tk.Label(st, text="◢", bg=T["bg"], fg=T["faint"], font=self.f_small,
                              cursor="size_nw_se")
         self.grip.pack(side="right", padx=(0, self.px(8)), pady=pad)
@@ -1519,6 +1541,59 @@ class Overlay:
         if not hasattr(self, "gear"):
             return
         self.gear.configure(fg=(T["accent"] if self.read_only else T["muted"]))
+        self._paint_modes()
+
+    # Chip text + colour + the value worth showing, per mode attribute. The "worth showing"
+    # value is the NON-default one in each case: Read-only locks the session, Window-only
+    # narrows what gets captured, and Shareable means the overlay is visible in screen shares
+    # (stock is excluded — see SHOW_IN_SCREEN_SHARE_DEFAULT). Read-only takes the accent
+    # because it is the safety state, matching what the gear colour already signals.
+    MODE_CHIPS = {
+        "read_only":     ("⊘", "Read-only", "accent", True),
+        "window_shot":   ("▣", "Window",    "muted",  True),
+        "share_visible": ("◈", "Shared",    "muted",  True),
+    }
+
+    def _modes_fit(self, labels):
+        """Is there room on the bar for the spelled-out chips, or must they go glyph-only?
+        Overlays get kept narrow (all three chips spelled out want ~1.5x the default width),
+        and a clipped chip is worse than a terse one: pack just drops it off the edge, so the
+        mode would go from mislabelled to invisible. Measured against everything else already
+        on the bar. No feedback loop — the mode labels are excluded from `used`, so the answer
+        can't change as a result of acting on it."""
+        st = getattr(self, "status_frame", None)
+        avail = st.winfo_width() if st is not None else 0
+        if avail <= 1:
+            return True          # not laid out yet; <Configure> re-runs this once it is
+        mine = set(self.mode_lbls.values())
+        used = sum(w.winfo_reqwidth() + self.px(12) for w in st.pack_slaves() if w not in mine)
+        need = sum(self.f_small.measure(t) + self.px(10) for t in labels)
+        return used + need <= avail
+
+    def _paint_modes(self, _e=None):
+        """Re-pack the mode strip from current state. Everything is unpacked and re-packed in
+        MODE_CHIPS order rather than toggled individually, so the chips keep a stable
+        left-to-right order however they were switched on. Guarded so the paint helpers stay
+        safe to call before the status bar exists / in headless tests."""
+        if not getattr(self, "mode_lbls", None):
+            return
+        on = [k for k in self.MODE_CHIPS
+              if getattr(self, k, None) == self.MODE_CHIPS[k][3]]
+        full = self._modes_fit([f"{self.MODE_CHIPS[k][0]} {self.MODE_CHIPS[k][1]}" for k in on])
+        for lbl in self.mode_lbls.values():
+            lbl.pack_forget()
+        for key in on:
+            glyph, label, colour, _ = self.MODE_CHIPS[key]
+            self.mode_lbls[key].configure(text=(f"{glyph} {label}" if full else glyph),
+                                          fg=T[colour])
+            self.mode_lbls[key].pack(side="left", padx=(self.px(6), 0), pady=self.px(4),
+                                     before=self.attach_lbl)
+
+    def _active_modes(self):
+        """The chip texts currently on the bar, in bar order. Split out so a test can assert on
+        what is shown without reaching into Tk's pack internals."""
+        return [self.mode_lbls[k].cget("text") for k in self.MODE_CHIPS
+                if getattr(self, k, None) == self.MODE_CHIPS[k][3]]
 
     # Window-only / Shareable / Read-only moved into the ⚙ menu; their state is shown by
     # the checkmarks in _gear_items and (for Read-only) the gear color. These three keep
@@ -2164,30 +2239,189 @@ class Overlay:
         """A right-aligned rounded chat bubble (drawn on a full-width canvas). render() recomputes
         the whole box from a body font at the *current* zoom, so it grows/shrinks with Ctrl +/−
         like the flowing text — recomputing the box each time means the bigger font never overflows
-        a stale fixed size (the reason this used to be frozen). Registered with _register_zoomable."""
-        text = self._clip_bubble(text)
-        c = tk.Canvas(self.chat, bg=T["bg"], highlightthickness=0)
+        a stale fixed size (the reason this used to be frozen). Registered with _register_zoomable.
+
+        Click-to-copy: the bubble is a Canvas, so the text in it is *drawn*, not text — Tk has no
+        selection model for canvas items, which is why you can never drag-select your own message
+        the way you can Claude's (that side is real text in the Text widget). Clicking the bubble
+        copies it instead. It copies `raw`, captured BEFORE _clip_bubble, because the echo you see
+        is lossy on purpose: truncated at 2000 chars and with spaces injected into long unbroken
+        runs to keep canvas wrapping linear. Copying what's drawn would hand back mangled text."""
+        raw = "" if text is None else str(text)   # pre-clip original → this is what the clipboard gets
+        shown = self._clip_bubble(text)
+        c = tk.Canvas(self.chat, bg=T["bg"], highlightthickness=0, cursor="xterm", takefocus=0,
+                      selectbackground=T["accent"], selectforeground=T["on_accent"])
+        c._copied = False
+        c._shown = shown        # a partial selection yields a slice of THIS, i.e. of what is drawn
+        c._item = None          # the text item; selection and index lookups both target it
+        c._sel = None           # (anchor, last) inclusive char indices, kept across a re-render
+        st = {"hover": False, "anchor": None, "moved": False}
+
+        def paint():
+            """Hover / '✓ Copied' feedback WITHOUT a full redraw. render() starts with
+            delete("all"), which drops the canvas text selection — and hover fires while you
+            are mid-drag, so repainting that way would erase the selection as you made it."""
+            lit = c._copied or st["hover"]
+            try:
+                c.itemconfigure(c._rect, fill=T["sel"] if lit else T["user_card"])
+                if c._hint is not None:
+                    c.itemconfigure(c._hint, text="✓ Copied" if c._copied else "⧉ Copy",
+                                    fill=T["accent"] if c._copied else T["faint"],
+                                    state="normal" if lit else "hidden")
+            except Exception:
+                pass
+
         def render():
+            keep = c._sel                                   # zoom/resize must not lose a selection
             c.delete("all")
             full = max(self.px(200), self.chat.winfo_width() - 2 * self.px(18))
             maxw = max(self.px(140), int(full * 0.74))
             padx, pady, rad = self.px(13), self.px(9), self.px(14)
             body_font = tkfont.Font(root=self.root, font=self.f_body)   # current zoom
-            c._overlay_fonts = [body_font]                  # keep a ref so Tk won't GC it
-            tmp = c.create_text(0, 0, text=text, font=body_font, width=maxw, anchor="nw")
+            hint_font = tkfont.Font(root=self.root, font=self.f_small)
+            c._overlay_fonts = [body_font, hint_font]       # keep refs so Tk won't GC them
+            tmp = c.create_text(0, 0, text=shown, font=body_font, width=maxw, anchor="nw")
             bb = c.bbox(tmp)
             x1, y1, x2, y2 = bb if bb else (0, 0, maxw, self.px(18))
             c.delete(tmp)
             bw, bh = (x2 - x1) + 2 * padx, (y2 - y1) + 2 * pady
             bx = full - bw                                  # hug the right edge
-            round_rect(c, bx, 1, bx + bw, bh - 1, rad, fill=T["user_card"], outline="")
-            c.create_text(bx + padx, pady, text=text, font=body_font, fill=T["text"],
-                          width=maxw, anchor="nw")
+            c._rect = round_rect(c, bx, 1, bx + bw, bh - 1, rad, fill=T["user_card"], outline="")
+            c._item = c.create_text(bx + padx, pady, text=shown, font=body_font, fill=T["text"],
+                                    width=maxw, anchor="nw")
+            # Affordance sits in the gutter LEFT of the bubble (which hugs the right edge).
+            # maxw caps the bubble at 74% of the width, so there is normally room; when a short
+            # window leaves none, the fill change alone carries the feedback rather than drawing
+            # a label over the bubble's own corner. Sized to the WIDER label so it never reflows.
+            c._hint = None
+            if bx - self.px(8) >= hint_font.measure("✓ Copied"):
+                c._hint = c.create_text(bx - self.px(8), pady + body_font.metrics("linespace") / 2,
+                                        text="⧉ Copy", font=hint_font, anchor="e",
+                                        fill=T["faint"], state="hidden")
             c.configure(width=full, height=bh)
+            paint()
+            if keep:
+                select_chars(*keep)
+
+        def select_chars(a, b):
+            """Select shown[a:b+1] (Tk canvas selection is inclusive at both ends). Also the
+            seam tests use, because Tk drops synthesised drag events on the withdrawn widgets
+            this suite runs on, so a test cannot produce a selection by faking the mouse."""
+            if c._item is None:
+                return
+            try:
+                c.select_from(c._item, a)
+                c.select_to(c._item, b)
+            except Exception:
+                return
+            c._sel = (a, b)
+            self._sel_bubble = c
+
+        def sel_text():
+            if not c._sel:
+                return None
+            a, b = sorted(c._sel)
+            return shown[a:b + 1] or None
+
+        def restore():
+            try:
+                c._copied = False
+                paint()
+            except Exception:
+                pass
+
+        def copy(payload):
+            try:
+                self.root.clipboard_clear()
+                self.root.clipboard_append(payload)
+            except Exception:
+                pass
+            c._copied = True
+            paint()                    # paint() honours _copied → swaps in the '✓ Copied' state
+            try:
+                c.after(1200, restore)
+            except Exception:
+                pass
+
+        def hit(e):
+            return c.index(c._item, "@%d,%d" % (int(c.canvasx(e.x)), int(c.canvasy(e.y))))
+
+        def on_press(e):
+            self._bubble_sel_clear(keep=c)       # only one bubble may show a selection at a time
+            try:
+                c.select_clear()
+            except Exception:
+                pass
+            c._sel = None
+            st["moved"] = False
+            try:
+                st["anchor"] = hit(e)
+                c.focus_set()                    # so <Control-c> reaches us, as the chat Text does
+            except Exception:
+                st["anchor"] = None
+            return "break"
+
+        def on_motion(e):
+            if st["anchor"] is None or c._item is None:
+                return "break"
+            try:
+                cur = hit(e)
+            except Exception:
+                return "break"
+            if cur == st["anchor"] and not st["moved"]:
+                return "break"           # a still press is not a drag; don't flash a 1-char select
+            st["moved"] = True
+            select_chars(st["anchor"], cur)
+            return "break"
+
+        def on_release(_e):
+            if not st["moved"]:          # press+release with no drag → the whole-message shortcut
+                on_click()
+            st["anchor"] = None
+            return "break"
+
+        def on_click(_e=None):
+            """Whole-message copy. Copies `raw`, captured BEFORE _clip_bubble, because the echo
+            you see is lossy on purpose: truncated at 2000 chars and with spaces injected into
+            long unbroken runs to keep canvas wrapping linear."""
+            copy(raw)
+            return "break"
+
+        def on_ctrl_c(_e=None):
+            """Copy the highlighted part, or the whole message when nothing is highlighted.
+            A partial selection copies from the DRAWN text — that is what was highlighted."""
+            copy(sel_text() or raw)
+            return "break"
+
         render()
+        c.bind("<Enter>", lambda e: (st.update(hover=True), paint()))
+        c.bind("<Leave>", lambda e: (st.update(hover=False), paint()))
+        c.bind("<ButtonPress-1>", on_press)
+        c.bind("<B1-Motion>", on_motion)
+        c.bind("<ButtonRelease-1>", on_release)
+        c.bind("<Control-c>", on_ctrl_c)
+        c.bind("<Control-C>", on_ctrl_c)
+        # Exposed for the same reason as _copy_btn's: Tk drops a synthesised <Button-1> on a
+        # withdrawn widget and the suite runs withdrawn, so a test must call the handlers itself.
+        c._on_click, c._on_ctrl_c = on_click, on_ctrl_c
+        c._select_chars, c._sel_text = select_chars, sel_text
+        c._on_press, c._on_motion, c._on_release = on_press, on_motion, on_release
         c.bind("<MouseWheel>", self._fwd_wheel)   # embedded widget must not swallow the scroll
         self._register_zoomable(c, render)
         return c
+
+    def _bubble_sel_clear(self, keep=None):
+        """Drop the highlight on whichever user bubble currently owns one. Canvas selection is
+        per-canvas and every bubble is its own canvas, so starting a selection in one leaves the
+        previous one lit unless something clears it by hand — this is that something."""
+        prev = self._sel_bubble
+        if prev is not None and prev is not keep:
+            try:
+                prev.select_clear()
+                prev._sel = None
+            except Exception:
+                pass                      # bubble already destroyed by _prune_chat
+        self._sel_bubble = keep
 
     def _ensure_header(self):
         if not self._claude_header:
