@@ -121,6 +121,7 @@ try:
     from win32utils import _user32, _gdi32
     from worker import ClaudeWorker
     import authstate
+    import sessions
 except Exception as _e:
     _report_import_failure(_e)
 
@@ -1619,6 +1620,7 @@ class Overlay:
             (row(self.window_shot, "Window-only"), self.toggle_window_shot),
             (row(self.share_visible, "Shareable"), self.toggle_screen_share),
             (row(self.read_only, "Read-only"), self.toggle_read_only),
+            ("      Past conversations…", self.show_sessions),
         ]
 
     def _gear_menu(self, e):
@@ -3080,6 +3082,216 @@ class Overlay:
         self._resume_btn = c
         return c
 
+    # ── past conversations ────────────────────────────────────────────────────
+    # Rendered as cards INSIDE the transcript, never in a window of their own. This product
+    # exists to stop you managing windows; a history browser you have to Alt+Tab to would be
+    # the exact thing it is supposed to remove. Same embedded-canvas pattern as the resume
+    # button and tool chips, so the list scrolls, zooms and gets disposed of by Clear.
+    SHORT_SESSION = 3          # fewer typed messages than this → folded away by default
+
+    def show_sessions(self):
+        """Scan this project's transcripts on a thread and post the rows back through ui_q.
+        Off-thread because a cold scan reads megabytes of JSON (a warm one is stat()-only,
+        but the first open of the day is not), and janking the UI is not acceptable in a
+        window that sits on top of whatever you were doing."""
+        if getattr(self, "_sessions_loading", False):
+            return
+        self._sessions_loading = True
+        self.add_sys("\U0001f5c2  Looking through your past conversations…")
+
+        def work():
+            try:
+                store = sessions.Store(WORKING_DIR,
+                                       cache_dir=STATE_FILE.parent / "session-cache")
+                self.ui_q.put(("sessions", (store, store.list())))
+            except Exception as ex:
+                self.ui_q.put(("sessions_failed", str(ex)))
+        threading.Thread(target=work, name="session-scan", daemon=True).start()
+
+    def _show_session_rows(self, store, rows):
+        self._sessions_loading = False
+        rows = [s for s in rows if s.id != self._session_id]     # never offer the live one
+        if not rows:
+            self.add_sys("No earlier conversations in this folder yet.")
+            return
+        long_rows = [s for s in rows if s.messages >= self.SHORT_SESSION]
+        short_rows = [s for s in rows if s.messages < self.SHORT_SESSION]
+        for s in long_rows:
+            self._add_session_card(store, s)
+        if short_rows:
+            self._add_more_sessions(store, short_rows)
+        self._scroll_follow()
+
+    def _add_session_card(self, store, session):
+        self.chat.window_create("end", window=self._session_card(store, session),
+                                padx=self.px(16), pady=self.px(2))
+        self.chat.insert("end", "\n")
+
+    def _add_more_sessions(self, store, short_rows):
+        """One row standing in for the throwaway conversations. Folded rather than hidden:
+        'short' is a guess about importance, and a guess should be reversible."""
+        mark = self.chat.index("end-1c")
+        lbl = self._chip_canvas(
+            f"… {len(short_rows)} shorter conversation{'s' if len(short_rows) != 1 else ''}")
+
+        def expand(_e=None):
+            try:
+                self.chat.delete(mark, f"{mark} lineend +1c")
+            except Exception:
+                pass
+            for s in short_rows:
+                self._add_session_card(store, s)
+            self._scroll_follow()
+            return "break"
+        lbl.bind("<Button-1>", expand)
+        lbl._on_click = expand
+        self.chat.window_create("end", window=lbl, padx=self.px(16), pady=self.px(2))
+        self.chat.insert("end", "\n")
+
+    def _chip_canvas(self, text):
+        c = tk.Canvas(self.chat, bg=T["bg"], highlightthickness=0, cursor="hand2", takefocus=0)
+        c._label = text        # drawn, not Text content, so a test cannot read it back
+        st = {}
+
+        def render():
+            f = tkfont.Font(root=self.root, font=self.f_small)
+            c._overlay_fonts = [f]
+            st["w"], st["h"] = f.measure(text) + self.px(22), self.px(22)
+            c.configure(width=st["w"], height=st["h"])
+            draw(False)
+
+        def draw(hover):
+            c.delete("all")
+            round_rect(c, 1, 1, st["w"] - 1, st["h"] - 1, self.px(6),
+                       fill=T["tool_bg"] if hover else T["bg"], outline="")
+            c.create_text(st["w"] / 2, st["h"] / 2, text=text, anchor="center",
+                          font=c._overlay_fonts[0], fill=T["muted"] if hover else T["faint"])
+        render()
+        c.bind("<Enter>", lambda e: draw(True))
+        c.bind("<Leave>", lambda e: draw(False))
+        c.bind("<MouseWheel>", self._fwd_wheel)
+        self._register_zoomable(c, render)
+        return c
+
+    def _session_thumb(self, path, box):
+        """The session's first screenshot, scaled into `box`. Returns a PhotoImage or None.
+
+        The thumbnail is the point of these cards: you recognise a conversation by what was
+        on your screen at the time far faster than by any title, and this is the only Claude
+        client that has that to show you.
+        """
+        if not path:
+            return None
+        try:
+            with Image.open(path) as im:
+                im.load()
+                im = im.convert("RGB")
+                im.thumbnail(box, Image.LANCZOS)
+                return ImageTk.PhotoImage(im)
+        except Exception:
+            return None
+
+    def _session_card(self, store, session):
+        """One conversation: thumbnail, title, subtitle, age + message count, and a ✕.
+
+        Click resumes it. ✕ arms a confirm on the card itself rather than popping a dialog —
+        a modal would steal focus from whatever you are actually working in, which is the
+        one thing this overlay must never do.
+        """
+        c = tk.Canvas(self.chat, bg=T["bg"], highlightthickness=0, cursor="hand2", takefocus=0)
+        c._state = "idle"          # idle | confirm | gone | resuming
+        st = {"w": 0, "h": 0}
+
+        def render():
+            c.delete("all")
+            f_t = tkfont.Font(root=self.root, font=self.f_small)
+            f_s = tkfont.Font(root=self.root, font=self.f_small)
+            c._overlay_fonts = [f_t, f_s]
+            full = max(self.px(220), self.chat.winfo_width() - 2 * self.px(34))
+            pad, th, tw = self.px(9), self.px(38), self.px(60)
+            st["w"], st["h"] = full, th + 2 * pad
+            c.configure(width=full, height=st["h"])
+            hover = getattr(c, "_hover", False) and c._state == "idle"
+            round_rect(c, 1, 1, full - 1, st["h"] - 1, self.px(9),
+                       fill=T["tool_bg"] if hover else T["field"], outline="")
+
+            if c._state == "gone":
+                c.create_text(full / 2, st["h"] / 2, text="✓  Deleted", anchor="center",
+                              font=f_t, fill=T["faint"])
+                return
+            if c._state == "confirm":
+                c.create_text(pad + self.px(4), st["h"] / 2, anchor="w", font=f_t,
+                              fill=T["text"], text="Delete this conversation?")
+                c.create_text(full - pad - self.px(4), st["h"] / 2, anchor="e", font=f_t,
+                              fill=T["muted"], text="Cancel", tags="no")
+                c.create_text(full - pad - f_t.measure("Cancel") - self.px(18), st["h"] / 2,
+                              anchor="e", font=f_t, fill=T["err"], text="Delete", tags="yes")
+                return
+
+            x = pad
+            photo = getattr(c, "_photo", None)
+            if photo is not None:
+                c.create_image(x, st["h"] / 2, image=photo, anchor="w")
+                x += tw + self.px(10)
+            right = full - pad - self.px(16)
+            c.create_text(x, pad + self.px(2), text=_fit(session.title, f_t, right - x),
+                          anchor="nw", font=f_t, fill=T["text"])
+            meta = f"{self._age_str(session.age)} ago  ·  {session.messages} message" \
+                   f"{'s' if session.messages != 1 else ''}"
+            sub = session.subtitle
+            c.create_text(x, pad + self.px(16), anchor="nw", font=f_s, fill=T["faint"],
+                          text=_fit(f"{meta}   {sub}" if sub else meta, f_s, right - x))
+            c.create_text(full - pad, st["h"] / 2, text="✕", anchor="e", font=f_t,
+                          fill=T["faint"], tags="del")
+
+        def _fit(text, font, width):
+            text = text or ""
+            if width <= 0 or font.measure(text) <= width:
+                return text
+            while text and font.measure(text + "…") > width:
+                text = text[:-1]
+            return text + "…"
+
+        def set_state(s):
+            c._state = s
+            c.configure(cursor="hand2" if s in ("idle", "confirm") else "arrow")
+            render()
+
+        def on_click(_e=None):
+            if c._state != "idle" or self.busy:
+                return "break"
+            set_state("resuming")
+            self._set_status("resuming that conversation…")
+            self.worker.resume(session.id)
+            return "break"
+
+        def arm(_e=None):
+            if c._state == "idle":
+                set_state("confirm")
+            return "break"
+
+        def do_delete(_e=None):
+            if c._state != "confirm":
+                return "break"
+            set_state("gone" if store.delete(session) else "idle")
+            if c._state == "idle":
+                self.add_sys("⚠ Couldn't delete that conversation — the file is in use.")
+            return "break"
+
+        c._on_click, c._arm, c._delete = on_click, arm, do_delete
+        c._cancel = lambda _e=None: (set_state("idle"), "break")[1]
+        c._photo = self._session_thumb(session.thumb, (self.px(60), self.px(38)))
+        render()
+        c.bind("<Enter>", lambda e: (setattr(c, "_hover", True), render()))
+        c.bind("<Leave>", lambda e: (setattr(c, "_hover", False), render()))
+        c.bind("<Button-1>", on_click)
+        c.tag_bind("del", "<Button-1>", arm)
+        c.tag_bind("yes", "<Button-1>", do_delete)
+        c.tag_bind("no", "<Button-1>", c._cancel)
+        c.bind("<MouseWheel>", self._fwd_wheel)
+        self._register_zoomable(c, render)
+        return c
+
     def _persist_session(self):
         """Record the current conversation's session id (+ when and where) so the next
         launch can offer to resume it. Called per completed turn — cheap (a tiny JSON
@@ -4305,6 +4517,12 @@ class Overlay:
             self._capture_busy = False
             if payload:
                 self._precaptured = (payload, time.monotonic())
+        elif kind == "sessions":
+            store, rows = payload
+            self._show_session_rows(store, rows)
+        elif kind == "sessions_failed":
+            self._sessions_loading = False
+            self.add_err(f"Couldn't read your past conversations: {payload}")
         elif kind == "status":
             self._set_status(str(payload))
         elif kind == "permission_mode":
