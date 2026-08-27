@@ -338,6 +338,9 @@ script here *scans* that folder and uses whatever runs, no matter how it got the
 | &nbsp;&nbsp;• Show / hide in screen shares | **⚙ → Shareable** (visible to Teams/Zoom/OBS; off = private, the default) |
 | &nbsp;&nbsp;• Lock Claude read-only | **⚙ → Read-only** ("plan" mode: looks and answers, changes nothing; off = the configured `PERMISSION_MODE`) |
 | Switch model | click the **statusline** (`model ▾`) |
+| See how much allowance is left | the statusline's `quota 78% (5h) · resets 19:40` — the CLI's own rate-limit reading, amber as you approach it and red once it's gone; it speaks up once per transition, and a message refused for allowance is put back in the box rather than lost |
+| Retry when the allowance returns | a refused message offers **⏱ Send it automatically at &lt;time&gt;** — opt-in, one click, and it stands down the moment you type something else, send by hand, or Clear |
+| See how much context is left | the same slot shows `context 72% · ~8 turns` once context passes 70% — turns extrapolated from what recent ones cost. Below that the allowance is the number that matters, so context stays out of the way |
 | Zoom text in / out | **Ctrl +** / **Ctrl −** (or **Ctrl + mouse-wheel**); **Ctrl 0** resets |
 | New conversation | **Clear** |
 | Compact the conversation (free up context) | **Compact** — summarizes older turns, keeps going |
