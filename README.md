@@ -374,7 +374,7 @@ to change, using the constant names below — for example:
 
 Overridable: `WORKING_DIR`, `MODEL`, `EFFORT`, `PERMISSION_MODE`, `SKILLS`,
 `STRICT_MCP_CONFIG`, `CLI_UPDATE_CHECK`, `AUTO_SCREENSHOT_DEFAULT`, `SHOT_SCOPE`,
-`SHOT_FORMAT`, `SHOT_JPEG_QUALITY`, `HIDE_SCREENSHOT_TOOL`, `THEME`,
+`SHOT_FORMAT`, `SHOT_JPEG_QUALITY`, `SHOT_DEDUPE_BITS`, `HIDE_SCREENSHOT_TOOL`, `THEME`,
 `SHOW_IN_SCREEN_SHARE_DEFAULT`, `TASKBAR_BUTTON`, `HOTKEY`, `WINDOW_ALPHA`,
 `CORNER_RADIUS`, `ORB_SIZE`, `FONT_SANS` / `FONT_SERIF` / `FONT_MONO`.
 
@@ -419,6 +419,14 @@ The settings themselves:
 - `SHOT_FORMAT` / `SHOT_JPEG_QUALITY` (or the `CLAUDE_OVERLAY_SHOT_FORMAT` /
   `CLAUDE_OVERLAY_SHOT_JPEG_QUALITY` env vars) — screenshot payload: `"auto"` keeps
   the smaller of PNG/JPEG per capture; `"png"`/`"jpeg"` force one; JPEG quality 50–95.
+- `SHOT_DEDUPE_BITS` (or `CLAUDE_OVERLAY_SHOT_DEDUPE_BITS`) — how different two
+  auto-captures may look and still count as the same screen, in bits out of a 1024-bit
+  perceptual hash. Auto-shot attaches a capture to **every** message and each one keeps
+  costing vision tokens for the rest of the conversation, so a screen you haven't touched
+  is skipped and Claude is pointed at the copy already in context. `2` (default) ignores
+  a blinking caret, a ticking clock and re-compression noise while still re-sending on a
+  single new line of terminal output; raising it past `3` starts missing small real
+  changes, and `0` falls back to exact-bytes only.
 - `SHOT_SCOPE` (or the `CLAUDE_OVERLAY_SHOT_SCOPE` env var) — what a screenshot covers:
   `"screens"` (default) captures every monitor, one image each; `"window"` captures
   **only the active window** — more private and cheaper in vision tokens, but Claude

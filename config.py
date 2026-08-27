@@ -164,6 +164,19 @@ SHOT_FORMAT = os.environ.get("CLAUDE_OVERLAY_SHOT_FORMAT", "auto").strip().lower
 SHOT_JPEG_QUALITY = _env_int("CLAUDE_OVERLAY_SHOT_JPEG_QUALITY", 82, 50, 95)
                                  # Claude downsamples larger images internally anyway, so
                                  # bigger files only cost upload time + vision tokens.
+SHOT_DEDUPE_BITS = _env_int("CLAUDE_OVERLAY_SHOT_DEDUPE_BITS", 2, 0, 128)
+                                 # how different two auto-captures may look and still count as
+                                 # the same screen: differing bits, out of the 1024 in a
+                                 # perceptual hash (see _shot_phash). Measured 2026-08 on a
+                                 # 1568×900 IDE capture — noise: a ticking clock 0, a blinking
+                                 # caret 2, a JPEG re-encode of identical pixels 1; real
+                                 # changes: one new line of terminal output 4, a small modal
+                                 # 14, a three-line scroll 150. 2 is deliberately tight: the
+                                 # gap between the loudest noise and the quietest real change
+                                 # is only 2 bits, and re-sending an image costs seconds while
+                                 # missing one costs a wrong answer. Raising it past 3 starts
+                                 # dropping single-line changes. 0 disables the perceptual
+                                 # test entirely, leaving only byte-equality.
 SHOT_SCOPE = os.environ.get("CLAUDE_OVERLAY_SHOT_SCOPE", "screens").strip().lower()
                                  # what a screenshot covers — the STARTUP default; flip it live
                                  # via the status-bar "Window-only" toggle. "screens" (default):
@@ -422,6 +435,7 @@ _USER_CONFIG_KEYS = {
     "SHOT_SCOPE": _v_choice("screens", "window"),
     "SHOT_FORMAT": _v_choice("auto", "png", "jpeg"),
     "SHOT_JPEG_QUALITY": _v_num(50, 95, int),
+    "SHOT_DEDUPE_BITS": _v_num(0, 128, int),
     "HIDE_SCREENSHOT_TOOL": _v_bool,
     # appearance / window
     "THEME": _v_choice("light", "dark"),
@@ -441,6 +455,7 @@ _USER_CONFIG_KEYS = {
 _ENV_BEATS_JSON = {
     "SHOT_FORMAT": "CLAUDE_OVERLAY_SHOT_FORMAT",
     "SHOT_JPEG_QUALITY": "CLAUDE_OVERLAY_SHOT_JPEG_QUALITY",
+    "SHOT_DEDUPE_BITS": "CLAUDE_OVERLAY_SHOT_DEDUPE_BITS",
     "SHOT_SCOPE": "CLAUDE_OVERLAY_SHOT_SCOPE",
     "STRICT_MCP_CONFIG": "CLAUDE_OVERLAY_STRICT_MCP",
     "CLI_UPDATE_CHECK": "CLAUDE_OVERLAY_CLI_UPDATE_CHECK",

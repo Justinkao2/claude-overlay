@@ -319,3 +319,121 @@ class TestDedupeMemoryClears:
         ov._handle("error", "transport died — reconnecting with a fresh session")
         text, paths = self._resend_same(ov, tmp_path)
         assert paths and "UNCHANGED" not in text
+
+
+class TestPerceptualDedupe:
+    """Byte-equality catches almost nothing on a live desktop: four grabs of an untouched
+    screen produced four different sha256s. The perceptual hash is what actually stops the
+    re-sends, so what matters is where it draws the line — quiet enough to ignore a caret,
+    sharp enough to notice one new line of output."""
+
+    @staticmethod
+    def _screen(path, *, dialog=False, clock="12:04:31", caret=False, line=False, scroll=0):
+        """A plausible 1568×900 IDE capture, with optional small differences applied."""
+        from PIL import Image, ImageDraw
+        import random
+        random.seed(7)
+        W, H = 1568, 900
+        im = Image.new("RGB", (W, H), (30, 30, 34))
+        d = ImageDraw.Draw(im)
+        d.rectangle([0, 0, 220, H], fill=(24, 24, 27))
+        for i in range(40):
+            d.rectangle([250, 24 + i * 21, 250 + random.randint(120, 900), 24 + i * 21 + 9],
+                        fill=(random.randint(90, 200),) * 3)
+        d.rectangle([0, H - 26, W, H], fill=(40, 90, 140))
+        d.text((W - 120, H - 20), clock, fill=(240, 240, 240))
+        if caret:
+            d.rectangle([620, 300, 622, 316], fill=(255, 255, 255))
+        if line:
+            d.rectangle([250, 24 + 40 * 21, 900, 24 + 40 * 21 + 9], fill=(200, 200, 200))
+        if dialog:
+            d.rectangle([600, 360, 960, 540], fill=(245, 245, 245), outline=(0, 0, 0))
+        if scroll:
+            shifted = Image.new("RGB", (W, H), (30, 30, 34))
+            shifted.paste(im, (0, -21 * scroll))
+            im = shifted
+        im.save(path)
+        return str(path)
+
+    def _distance(self, tmp_path, **change):
+        import claude_overlay as co
+        a = co._shot_phash(self._screen(tmp_path / "a.png"))
+        b = co._shot_phash(self._screen(tmp_path / "b.png", **change))
+        return bin(a ^ b).count("1")
+
+    def test_cosmetic_noise_stays_under_the_threshold(self, tmp_path):
+        import claude_overlay as co
+        for label, change in (("clock tick", {"clock": "12:04:32"}), ("caret", {"caret": True})):
+            d = self._distance(tmp_path, **change)
+            assert d <= co.SHOT_DEDUPE_BITS, f"{label} moved {d} bits — would force a re-send"
+
+    def test_one_new_line_of_output_is_over_the_threshold(self, tmp_path):
+        # The tightest real change the overlay must not swallow: if a single new line can be
+        # deduped away, Claude answers about a screen that no longer exists.
+        import claude_overlay as co
+        assert self._distance(tmp_path, line=True) > co.SHOT_DEDUPE_BITS
+
+    def test_dialog_and_scroll_are_far_over_the_threshold(self, tmp_path):
+        import claude_overlay as co
+        assert self._distance(tmp_path, dialog=True) > co.SHOT_DEDUPE_BITS * 3
+        assert self._distance(tmp_path, scroll=3) > co.SHOT_DEDUPE_BITS * 10
+
+    def test_recompression_of_the_same_pixels_is_deduped(self, shooting, tmp_path):
+        # The case byte-equality misses on every real machine: same screen, different bytes.
+        from PIL import Image
+        src = self._screen(tmp_path / "src.png")
+        Image.open(src).save(tmp_path / "q82.jpg", quality=82)
+        Image.open(src).save(tmp_path / "q80.jpg", quality=80)
+        ov = shooting
+        _arm_precapture(ov, tmp_path / "q82.jpg")
+        _send(ov, "first")
+        _finish_clean(ov)
+        _arm_precapture(ov, tmp_path / "q80.jpg")
+        _send(ov, "second")
+        _, second = _asks(ov)
+        assert second[1][1] == []
+        assert "UNCHANGED" in second[1][0]
+
+    def test_a_real_change_still_attaches(self, shooting, tmp_path):
+        ov = shooting
+        _arm_precapture(ov, self._screen(tmp_path / "before.png"))
+        _send(ov, "first")
+        _finish_clean(ov)
+        after = self._screen(tmp_path / "after.png", dialog=True)
+        _arm_precapture(ov, after)
+        _send(ov, "second")
+        _, second = _asks(ov)
+        assert second[1][1] == [after]
+        assert "UNCHANGED" not in second[1][0]
+
+    def test_undecodable_files_fall_back_to_byte_equality(self, shooting, tmp_path):
+        # Nothing in the pipeline guarantees a readable image (a truncated write, a capture
+        # that failed half-way). "No opinion" must never be read as "unchanged".
+        import claude_overlay as co
+        assert co._shot_phash(str(_shot_file(tmp_path, "junk.png", b"not-an-image"))) is None
+        assert co._shot_looks_same(None, 0) is False
+        ov = shooting
+        _arm_precapture(ov, _shot_file(tmp_path, "j1.png", b"junk-a"))
+        _send(ov, "first")
+        _finish_clean(ov)
+        p2 = _shot_file(tmp_path, "j2.png", b"junk-b")
+        _arm_precapture(ov, p2)
+        _send(ov, "second")
+        _, second = _asks(ov)
+        assert second[1][1] == [str(p2)]
+
+    def test_drift_is_measured_against_what_the_model_HAS(self, shooting, tmp_path):
+        # Each turn moves the screen a little. Comparing against the previous CAPTURE would
+        # let unlimited drift accumulate silently; comparing against the committed BASELINE
+        # re-attaches once the total drift matters, which is the honest reading of
+        # "has this changed since you last saw it".
+        ov = shooting
+        _arm_precapture(ov, self._screen(tmp_path / "t0.png"))
+        _send(ov, "first")
+        _finish_clean(ov)
+        for i in range(1, 4):
+            path = self._screen(tmp_path / f"t{i}.png", scroll=i)
+            _arm_precapture(ov, path)
+            _send(ov, f"turn {i}")
+            _finish_clean(ov)
+        assert all(a[1][1] for a in _asks(ov)[1:]), "drifting screens must keep re-attaching"
