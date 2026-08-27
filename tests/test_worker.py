@@ -1207,3 +1207,69 @@ class TestAuthRecycle:
         asyncio.run(w._auth_recycle())
         assert calls == []                    # _run_turn opens a fresh client itself
         assert w._creds_sig == (999, 33)      # still re-pinned so the next turn is quiet
+
+
+# ---------------------------------------------------------------------------
+# 12. _emit_quota  (rate-limit reading → the UI's allowance gauge)
+# ---------------------------------------------------------------------------
+
+class _FakeRateLimitInfo:
+    """Shaped like the SDK's RateLimitInfo. Built by hand rather than imported so these
+    tests still describe the contract on an SDK that predates the type."""
+
+    def __init__(self, **kw):
+        self.status = kw.get("status", "allowed")
+        self.utilization = kw.get("utilization", 0.5)
+        self.resets_at = kw.get("resets_at", 1_800_000_000)
+        self.rate_limit_type = kw.get("rate_limit_type", "five_hour")
+
+
+class RateLimitEvent:
+    """Deliberately named exactly as the SDK names it: the dispatch matches on class NAME,
+    so a stand-in called anything else would test nothing."""
+
+    def __init__(self, info):
+        self.rate_limit_info = info
+
+
+class TestEmitQuota:
+
+    def test_flattens_the_reading_for_the_ui(self):
+        w = make_worker()
+        w._emit_quota(_FakeRateLimitInfo(status="allowed_warning", utilization=0.82,
+                                         resets_at=1_800_000_000, rate_limit_type="seven_day"))
+        assert _drain(w.ui) == [("quota", {"status": "allowed_warning", "utilization": 0.82,
+                                           "resets_at": 1_800_000_000, "window": "seven_day"})]
+
+    def test_a_missing_utilization_survives_as_none(self):
+        # The UI falls back to the context gauge rather than print a percentage it doesn't
+        # have, so the absence has to arrive intact instead of becoming 0.
+        w = make_worker()
+        w._emit_quota(_FakeRateLimitInfo(utilization=None))
+        (_, payload), = _drain(w.ui)
+        assert payload["utilization"] is None
+
+    def test_integer_utilization_is_normalized_to_float(self):
+        w = make_worker()
+        w._emit_quota(_FakeRateLimitInfo(utilization=1))
+        (_, payload), = _drain(w.ui)
+        assert payload["utilization"] == 1.0
+
+    def test_nothing_to_report_queues_nothing(self):
+        w = make_worker()
+        w._emit_quota(None)
+        assert _drain(w.ui) == []
+
+    def test_an_unexpected_shape_is_swallowed(self):
+        # Informational only: a surprise here must never break the turn carrying it.
+        w = make_worker()
+        w._emit_quota(object())
+        assert _drain(w.ui) == []
+
+    def test_the_dispatch_routes_the_event_by_class_name(self):
+        # Matched by name, not isinstance, so an SDK without RateLimitEvent just never
+        # produces one instead of failing to import.
+        w = make_worker()
+        w._dispatch_inner(RateLimitEvent(_FakeRateLimitInfo(utilization=0.9)), {})
+        (kind, payload), = _drain(w.ui)
+        assert kind == "quota" and payload["utilization"] == 0.9

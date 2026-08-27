@@ -682,6 +682,10 @@ class ClaudeWorker(threading.Thread):
                 tot = u.get("totalTokens")
                 if isinstance(tot, (int, float)) and tot > 0:
                     self._ctx_tokens = int(tot)
+                    # Sent alongside the percentage, not folded into it: the UI prices a
+                    # would-be /compact off the absolute size, and "ctx" has to stay a bare
+                    # number for everything already reading it.
+                    self.ui.put(("ctx_tokens", self._ctx_tokens))
                 if u.get("percentage") is not None:
                     self.ui.put(("ctx", u["percentage"]))
         except Exception:
@@ -901,6 +905,35 @@ class ClaudeWorker(threading.Thread):
             except Exception:
                 pass
 
+    def _emit_quota(self, info):
+        """Push the CLI's own rate-limit reading to the UI.
+
+        This is the only number that tracks what actually ENDS a session. The context gauge
+        measures how big the conversation is; the allowance is spent by every message and
+        isn't given back when Clear or /compact shrink the conversation again — so a window
+        sitting at 2% can sit beside an allowance that's nearly gone. The CLI emits this
+        whenever the status transitions, and the SDK models it as RateLimitEvent.
+
+        Read by attribute, never by import: an SDK without these types simply never reaches
+        this method, and one that adds fields to RateLimitInfo doesn't break it."""
+        # A status string is the one field the CLI always sends, so its absence means this
+        # isn't a reading at all. Without the guard getattr-with-default would happily build
+        # an all-None payload, and the UI would take that for a genuine transition to an
+        # unknown status — re-arming a warning it had already given.
+        if not isinstance(getattr(info, "status", None), str):
+            return
+        try:
+            util = getattr(info, "utilization", None)
+            payload = {"status": getattr(info, "status", None),
+                       "utilization": float(util) if isinstance(util, (int, float)) else None,
+                       "resets_at": getattr(info, "resets_at", None),
+                       "window": getattr(info, "rate_limit_type", None)}
+        except Exception:
+            return
+        dbg("quota", "status=%s util=%s window=%s"
+            % (payload["status"], payload["utilization"], payload["window"]))
+        self.ui.put(("quota", payload))
+
     @staticmethod
     def _compact_meta(msg):
         """Pull {pre_tokens, post_tokens, duration_ms, trigger} from a compact_boundary
@@ -1077,6 +1110,8 @@ class ClaudeWorker(threading.Thread):
             self.ui.put(("result", {"cost": getattr(msg, "total_cost_usd", None),
                                     "is_error": is_err, "subtype": subtype,
                                     "result": detail, "stop_reason": stop_reason}))
+        elif type(msg).__name__ == "RateLimitEvent":
+            self._emit_quota(getattr(msg, "rate_limit_info", None))
         elif type(msg).__name__ == "SystemMessage":
             # The init system message carries the session id the moment the first turn
             # streams — earlier than the result, so a turn interrupted mid-stream still

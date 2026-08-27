@@ -445,6 +445,20 @@ class Overlay:
         self._toggle_request = False
         self._model = None
         self._ctx_pct = None
+        self._ctx_tokens = None         # absolute context size, for pricing a would-be /compact
+        self._ctx_hist: list = []       # context % at the end of each of the last few turns →
+                                        # burn rate → how many turns of headroom are left
+        self._ctx_warned = 0.0          # highest warning tier already announced; reset with the
+                                        # conversation and after a compaction wins the room back
+        self._ctx_sample_due = False    # a turn ended; the next usage refresh is its data point
+        self._quota = None              # last rate-limit reading the CLI reported (see "quota")
+        self._quota_said = None         # status already announced, so each transition speaks once
+        self._last_sent = None          # (text, images) of the last message handed to the worker,
+                                        # so a refusal that never reached Claude can give it back
+        self._retry = None              # {"at", "text", "armed"} — a refused message waiting for
+                                        # the allowance to come back (see _offer_retry)
+        self._retry_btn = None          # the in-chat arm/cancel button for it
+        self._retry_after = None        # pending after() id for the poll tick
         self._claude_header = False
         self._thinking_active = False   # a thinking block is open in the current turn
         # streaming-Markdown renderer state (per turn): the current unfinished answer line
@@ -1361,8 +1375,17 @@ class Overlay:
         self.statusline_frame = sl
         self.statusline = tk.Label(sl, text="connecting…", bg=T["bg"], fg=T["faint"],
                                    font=self.f_small, anchor="w", cursor="hand2")
-        self.statusline.pack(side="left", padx=(self.px(16), self.px(6)), pady=(0, self.px(6)))
+        self.statusline.pack(side="left", padx=(self.px(16), 0), pady=(0, self.px(6)))
         self.statusline.bind("<Button-1>", self._model_menu)
+        # The context gauge is its OWN label so it can go amber/red on its own: recolouring one
+        # line to warn about one number would have dragged the model name and version with it.
+        # It also keeps the model menu's click target on the model, where it belongs.
+        self.ctx_lbl = tk.Label(sl, text="", bg=T["bg"], fg=T["faint"],
+                                font=self.f_small, anchor="w")
+        self.ctx_lbl.pack(side="left", padx=(self.px(9), 0), pady=(0, self.px(6)))
+        self.ver_lbl = tk.Label(sl, text="", bg=T["bg"], fg=T["faint"],
+                                font=self.f_small, anchor="w")
+        self.ver_lbl.pack(side="left", padx=(self.px(9), self.px(6)), pady=(0, self.px(6)))
         self.busy_lbl = tk.Label(sl, text="", bg=T["bg"], fg=T["accent"],
                                  font=self.f_small, anchor="e")
         self.busy_lbl.pack(side="right", padx=(0, self.px(16)), pady=(0, self.px(6)))
@@ -3761,6 +3784,11 @@ class Overlay:
         self._refresh_attach()
         self.entry.delete("1.0", "end")
         self._ph_active = False
+        self._last_sent = (text, images)   # a turn refused for allowance never reached Claude;
+                                           # _restore_draft hands the text back (see "result")
+        self._cancel_retry()               # sending by hand IS the retry — whether this is the
+                                           # armed message or a different one, the schedule has
+                                           # been overtaken and must not fire later on its own
         # Auto-screenshots only: drop any capture that the model already has — the same bytes,
         # or (far more often, since a live desktop never re-encodes identically) the same
         # picture. Re-attaching buys nothing and costs real latency (measured 2026-08:
@@ -4179,6 +4207,14 @@ class Overlay:
         # async reset (close + reconnect) runs; the new session's true baseline arrives via the
         # worker's post-_open _emit_usage.
         self._ctx_pct = None
+        self._ctx_tokens = None
+        self._ctx_hist.clear()          # a new conversation burns at its own rate, not the old
+        self._ctx_warned = 0.0          # …and has earned the warning back
+        self._ctx_sample_due = False
+        self._last_sent = None          # a thrown-away conversation's draft must not come back
+                                        # (the quota reading itself survives: the allowance is
+                                        # the account's, not this conversation's)
+        self._cancel_retry()            # …and its scheduled retry must not fire into the new one
         self._refresh_statusline()
         # Clear = deliberate discard: forget the session AND its persisted record, so
         # the next launch can't offer to resume a conversation the user threw away.
@@ -4332,11 +4368,341 @@ class Overlay:
         self.busy_lbl.configure(text="thinking…" if busy else "")
 
     def _refresh_statusline(self):
-        p = f"{self._ctx_pct:.0f}%" if isinstance(self._ctx_pct, (int, float)) else "—"
         # version goes last so it clips first if the window is narrow; ⬆ flags an update
         ver = f"v{__version__}" + ("  ⬆" if self._update_available else "")
-        self.statusline.configure(
-            text=f"{self._model or 'Claude'} ▾   ·   context {p}   ·   {ver}", fg=T["muted"])
+        self.statusline.configure(text=f"{self._model or 'Claude'} ▾", fg=T["muted"])
+        self.ctx_lbl.configure(text=f"·   {self._gauge_text()}", fg=self._gauge_color())
+        self.ver_lbl.configure(text=f"·   {ver}", fg=T["muted"])
+
+    # ── the middle of the statusline ──
+    def _ctx_text(self):
+        """Context as a percentage, plus the headroom in turns once there's a slope to read."""
+        p = f"{self._ctx_pct:.0f}%" if isinstance(self._ctx_pct, (int, float)) else "—"
+        left = self._ctx_turns_left()
+        if left is not None:
+            p += f" · ~{left} turn{'' if left == 1 else 's'}"
+        return f"context {p}"
+
+    def _gauge_text(self):
+        """What the gauge says. The allowance owns the slot whenever the CLI has reported
+        one, because it's the limit that ends sessions; context joins it only once context is
+        over its own warning line and has become the more urgent of the two. Before any
+        rate-limit event arrives (an older CLI, or a session that hasn't transitioned yet)
+        the slot falls back to context, which is better than an empty gauge."""
+        q = self._quota or {}
+        u = q.get("utilization")
+        if not isinstance(u, (int, float)):
+            return self._ctx_text()
+        win = _QUOTA_WINDOWS.get(q.get("window"))
+        bits = [f"quota {u * 100:.0f}%" + (f" ({win})" if win else "")]
+        resets = self._quota_resets_text()
+        if resets:
+            bits.append(resets)
+        if isinstance(self._ctx_pct, (int, float)) and self._ctx_pct >= _CTX_WARN_PCT:
+            bits.append(self._ctx_text())
+        return " · ".join(bits)
+
+    def _quota_resets_text(self):
+        """When the allowance comes back, as a wall clock. A live countdown would need a timer
+        redrawing a number nobody watches tick; the time you can start again is the thing you
+        actually plan around. Weekly windows can reset days out, so those name the day too."""
+        ts = (self._quota or {}).get("resets_at")
+        if not isinstance(ts, (int, float)) or ts <= 0:
+            return ""
+        try:
+            fmt = "%H:%M" if ts - time.time() < 20 * 3600 else "%a %H:%M"
+            return "resets " + time.strftime(fmt, time.localtime(ts))
+        except Exception:
+            return ""
+
+    def _gauge_color(self):
+        q = self._quota or {}
+        u = q.get("utilization")
+        if isinstance(u, (int, float)):
+            st = q.get("status")
+            if st == "rejected" or u >= _QUOTA_HOT:
+                return T["err"]
+            if st == "allowed_warning":
+                return T["accent"]
+            return T["muted"]
+        return self._ctx_color()
+
+    def _ctx_color(self):
+        p = self._ctx_pct
+        if not isinstance(p, (int, float)):
+            return T["muted"]
+        if p >= _CTX_HOT_PCT:
+            return T["err"]
+        if p >= _CTX_WARN_PCT:
+            return T["accent"]
+        return T["muted"]
+
+    def _ctx_rate(self):
+        """Context percent consumed per turn over the recent window, or None when there's no
+        usable slope — fewer than two turns recorded, or a window that only went down."""
+        h = self._ctx_hist
+        if len(h) < 2:
+            return None
+        rate = (h[-1] - h[0]) / (len(h) - 1)
+        return rate if rate > 0 else None
+
+    def _ctx_turns_left(self):
+        """Whole turns of headroom at the current burn rate, or None if it can't be known.
+
+        Measured against a full window rather than the point where the CLI decides to
+        auto-compact, which we don't get told: the number is prefixed "~" and paired with a
+        warning that fires well before either, so it's a budget, not a countdown to a cliff."""
+        rate = self._ctx_rate()
+        if rate is None or not isinstance(self._ctx_pct, (int, float)):
+            return None
+        return max(0, int((100.0 - self._ctx_pct) / rate))
+
+    def _note_ctx_turn(self):
+        """Record where the context stood at the end of a turn, then warn if that's a new tier.
+
+        One sample per TURN, not per usage event: the rate worth showing is "how many more
+        messages do I get", and messages are the unit the user spends. A drop means something
+        won room back (a compaction, explicit or the CLI's own), so the old slope no longer
+        describes the new conversation — start the window over rather than average across it."""
+        p = self._ctx_pct
+        if not isinstance(p, (int, float)):
+            return
+        h = self._ctx_hist
+        if h and p < h[-1]:
+            h.clear()
+            self._ctx_warned = 0.0        # room won back → the warning is worth making again
+        h.append(float(p))
+        del h[:-_CTX_RATE_TURNS]
+        self._refresh_statusline()
+        self._maybe_warn_ctx()
+
+    def _maybe_warn_ctx(self):
+        """Say something ONCE per tier, at the end of a turn — the only moment at which
+        compacting is free. The CLI's own auto-compaction fires mid-answer, and running out
+        entirely ends the session; both are avoidable, but only if you're told in time."""
+        p = self._ctx_pct
+        if not isinstance(p, (int, float)) or self._compacting:
+            return
+        tier = _CTX_HOT_PCT if p >= _CTX_HOT_PCT else (_CTX_WARN_PCT if p >= _CTX_WARN_PCT else 0.0)
+        if not tier or tier <= self._ctx_warned:
+            return
+        self._ctx_warned = tier
+        left = self._ctx_turns_left()
+        room = f" — about {left} more turn{'' if left == 1 else 's'} at this rate" if left else ""
+        self.add_sys(f"◔ Context {p:.0f}% full{room}. {self._compact_advice()}")
+
+    def _announce_quota(self):
+        """Speak once per transition. The CLI only emits on change, but a reconnect replays
+        the current status, so remember what was already said rather than trust the stream.
+
+        This is the warning the overlay never had. Being cut off mid-task is what running out
+        of allowance feels like from the outside, and the entire value of having the number is
+        seeing it coming while there's still something to do about it."""
+        q = self._quota or {}
+        st = q.get("status")
+        if st == self._quota_said:
+            return
+        self._quota_said = st
+        if st not in ("allowed_warning", "rejected"):
+            return
+        win = _QUOTA_WINDOWS.get(q.get("window")) or "usage"
+        resets = self._quota_resets_text()
+        when = f" — {resets}" if resets else ""
+        if st == "rejected":
+            self.add_err(f"◔ Your {win} allowance is used up{when}.")
+        else:
+            u = q.get("utilization")
+            used = f"{u * 100:.0f}% of" if isinstance(u, (int, float)) else "close to"
+            self.add_sys(f"◔ {used} your {win} allowance is spent{when}. A smaller model "
+                         f"stretches what's left — click {self._model or 'the model'} ▾. "
+                         f"Turning Auto-shot off saves the most per message.")
+
+    def _restore_draft(self):
+        """Put a refused message back in the box.
+
+        A turn rejected for allowance never reached Claude, so the text is simply gone — and
+        it's gone at the exact moment the user has to wait hours to try again, which is the
+        worst possible time to have to remember what they were about to ask. Only fills an
+        EMPTY box: whatever they've started typing since outranks anything we kept."""
+        kept = (self._last_sent or ("", []))[0]
+        if not kept or self._entry_text():
+            return False
+        self._ph_out()
+        self.entry.insert("1.0", kept)
+        self._ph_active = False
+        self.entry.configure(fg=T["text"])
+        return True
+
+    # ── retrying when the allowance comes back ──
+    def _offer_retry(self, text):
+        """Offer to send a refused message the moment the allowance returns.
+
+        Opt-in, and deliberately so: arming this puts a message on the wire hours later,
+        quite possibly with nobody at the machine. That's a choice to make on purpose, not a
+        default to discover after the fact — so the overlay offers, and the user decides.
+
+        Needs a reset time to aim at. Without one there's nothing to schedule and the
+        restored draft stands on its own, which is still the important half."""
+        when = (self._quota or {}).get("resets_at")
+        if not isinstance(when, (int, float)) or when <= time.time() or not text:
+            return
+        self._cancel_retry()                    # never stack two offers
+        self._retry = {"at": int(when), "text": text, "armed": False}
+        self.chat.insert("end", "\n")
+        self._retry_btn = self._retry_btn_widget()
+        self.chat.window_create("end", window=self._retry_btn,
+                                padx=self.px(16), pady=self.px(2))
+        self.chat.insert("end", "\n")
+        self._scroll_follow()
+
+    def _retry_when(self):
+        r = self._retry or {}
+        ts = r.get("at")
+        if not isinstance(ts, (int, float)):
+            return ""
+        fmt = "%H:%M" if ts - time.time() < 20 * 3600 else "%a %H:%M"
+        return time.strftime(fmt, time.localtime(ts))
+
+    def _retry_btn_widget(self):
+        """Arm/cancel button for the scheduled retry — same embedded-canvas pattern as the
+        Copy and Update CLI buttons, including the wheel forward so it can't swallow scroll."""
+        c = tk.Canvas(self.chat, bg=T["bg"], highlightthickness=0, cursor="hand2", takefocus=0)
+        c._ustate = "idle"                         # idle | armed | sent | off
+        st = {"f": None, "w": 0, "h": 0, "rad": 0}
+        when = self._retry_when()
+        labels = {"idle":  f"⏱  Send it automatically at {when}",
+                  "armed": f"⏱  Waiting for {when} — click to cancel",
+                  "sent":  "✓  Sent when the allowance came back",
+                  "off":   "Cancelled — send it yourself whenever"}
+
+        def draw(hover=False):
+            c.delete("all")
+            s = c._ustate
+            if s == "idle":
+                bg = T["accent_hi"] if hover else T["accent"]
+                fg = T["on_accent"]
+            elif s == "armed":
+                bg, fg = (T["hover"] if hover else T["tool_bg"]), T["accent"]
+            else:                                  # sent / off → inert
+                bg, fg = T["tool_bg"], T["muted"]
+            round_rect(c, 1, 1, st["w"] - 1, st["h"] - 1, st["rad"], fill=bg, outline="")
+            c.create_text(st["w"] / 2, st["h"] / 2, text=labels[c._ustate], fill=fg,
+                          font=st["f"], anchor="center")
+
+        def render():
+            f = tkfont.Font(root=self.root, font=self.f_small)
+            c._overlay_fonts = [f]
+            pad = self.px(11)
+            widest = max(f.measure(v) for v in labels.values())   # widest state → no reflow
+            st.update(f=f, h=self.px(24), rad=self.px(7), w=pad + widest + pad)
+            c.configure(width=st["w"], height=st["h"])
+            draw()
+
+        def set_state(s):
+            c._ustate = s
+            try:
+                c.configure(cursor="hand2" if s in ("idle", "armed") else "arrow")
+                draw()
+            except Exception:
+                pass
+        c._set_ustate = set_state
+
+        def on_click(_e):
+            if c._ustate == "idle":
+                self._arm_retry()
+            elif c._ustate == "armed":
+                self._cancel_retry(note="⏱ Auto-send cancelled.")
+            return "break"                         # sent / off → inert
+        c._click = on_click
+
+        render()
+        c.bind("<Enter>", lambda e: draw(hover=True))
+        c.bind("<Leave>", lambda e: draw(hover=False))
+        c.bind("<Button-1>", on_click)
+        c.bind("<MouseWheel>", self._fwd_wheel)
+        self._register_zoomable(c, render)
+        return c
+
+    def _arm_retry(self):
+        if not self._retry:
+            return
+        self._retry["armed"] = True
+        self._set_retry_state("armed")
+        self.add_sys(f"⏱ Armed — your message goes out when the allowance resets "
+                     f"(about {self._retry_when()}). Type anything else and it stands down.")
+        self._retry_tick()
+
+    def _set_retry_state(self, state):
+        btn = self._retry_btn
+        if btn is not None:
+            try:
+                btn._set_ustate(state)
+            except Exception:
+                pass
+
+    def _cancel_retry(self, note=None):
+        """Stand down. Called on Clear, on a manual send, when the draft stops matching, and
+        from the button itself — anything that means the user has taken the wheel back."""
+        if self._retry_after is not None:
+            try:
+                self.root.after_cancel(self._retry_after)
+            except Exception:
+                pass
+            self._retry_after = None
+        was_armed = bool((self._retry or {}).get("armed"))
+        if self._retry is not None:
+            self._set_retry_state("off")
+        self._retry = None
+        self._retry_btn = None
+        if note and was_armed:
+            self.add_sys(note)
+
+    def _retry_tick(self):
+        """Poll the wall clock while a retry is armed. Also the place the guards live, because
+        an armed retry has to survive minutes or hours of the user doing other things."""
+        if self._retry_after is not None:
+            # Arming and the CLI's own "you're allowed again" can both land here; without
+            # this, each would leave its own after() chain polling the same retry.
+            try:
+                self.root.after_cancel(self._retry_after)
+            except Exception:
+                pass
+            self._retry_after = None
+        r = self._retry
+        if not r or not r.get("armed"):
+            return
+        if self._entry_text() != r["text"]:
+            # They've started writing something else. Sending the old text now would push
+            # their draft out from under them mid-sentence.
+            self._cancel_retry(note="⏱ Auto-send stood down — the box has something newer in it.")
+            return
+        if (r.get("ready") or time.time() >= r["at"]) and not self.busy and not self._compacting:
+            self._fire_retry()
+            return
+        self._retry_after = self.root.after(_RETRY_POLL_MS, self._retry_tick)
+
+    def _fire_retry(self):
+        """Send it. Disarms FIRST, and only once: if the allowance still refuses (a clock
+        that disagrees with the server's by a minute is enough), the refusal offers a fresh
+        button rather than spinning a retry loop nobody asked for."""
+        self._retry["armed"] = False
+        self._set_retry_state("sent")
+        self._retry = None
+        self._retry_btn = None
+        self.add_sys("⏱ Allowance is back — sending your message.")
+        self._send_or_stop()
+
+    def _compact_advice(self):
+        """What compacting would cost right now, in seconds. Quoting today's number is also
+        the argument for not waiting: the fitted duration rises with the size of what's being
+        summarized, so the same job only gets more expensive from here.
+
+        Deliberately restricted to our own remembered runs — _compact_samples_from_transcripts
+        reads a dozen files and this runs on the UI thread, where half a second of disk is a
+        visible stall in a window that sits on top of the user's work."""
+        eta = _compact_predict(_compact_history(), self._ctx_tokens) if self._ctx_tokens else None
+        cost = f" (~{self._compact_elapsed(eta)})" if eta else ""
+        return f"Compact now{cost} — it only gets slower as the window fills."
 
     # ── compaction animation (mirrors the Claude Code CLI's /compact spinner) ──
     def _start_compact_anim(self, payload=None):
@@ -4712,9 +5078,29 @@ class Overlay:
         elif kind == "ctx":
             self._ctx_pct = payload
             self._refresh_statusline()
+            # The worker schedules its usage refresh AFTER turn_done (to free "thinking…" a
+            # round-trip earlier), so the reading that actually includes the finished turn is
+            # this one — sample here rather than at turn_done, where it's a turn stale.
+            if self._ctx_sample_due:
+                self._ctx_sample_due = False
+                self._note_ctx_turn()
+        elif kind == "ctx_tokens":
+            self._ctx_tokens = payload
+        elif kind == "quota":
+            self._quota = payload if isinstance(payload, dict) else None
+            self._refresh_statusline()
+            self._announce_quota()
+            # The CLI saying the allowance is no longer rejected beats waiting for a clock we
+            # only ever got a prediction of. A retry is only ever armed after a rejection, so
+            # any later reading that isn't one means the window really has reopened.
+            r = self._retry
+            if r and r.get("armed") and (self._quota or {}).get("status") not in (None, "rejected"):
+                r["ready"] = True     # sticky: if we're mid-turn right now, the next tick uses it
+                self._retry_tick()
         elif kind == "turn_done":
             self._md_finalize()          # the turn ended → give the last line full block styling
             self._finish_turn_copy()     # then a Copy button under the reply
+            self._ctx_sample_due = True  # arm one burn-rate sample for the usage refresh coming
             self._set_busy(False)
             self._maybe_flag_done()      # badge the orb if this finished while collapsed
             # Whatever pending shot hashes weren't promoted by a clean "result" belong to a
@@ -4804,6 +5190,11 @@ class Overlay:
             # our side; surface it WITH the CLI's reason (subtype/result) instead of a generic line.
             if isinstance(payload, dict) and payload.get("is_error"):
                 self.add_err(self._format_turn_error(payload))
+                # A turn refused for allowance never reached Claude. Give the text back
+                # rather than make the user reconstruct it after a wait they didn't choose.
+                if "rate_limit" in str(payload.get("subtype") or "") and self._restore_draft():
+                    self.add_sys("↩ Your message is back in the box.")
+                    self._offer_retry((self._last_sent or ("", []))[0])
                 # This turn's screenshots may never have reached the model — drop their
                 # staged hashes so the next send re-attaches instead of saying "unchanged".
                 # (Hashes already COMMITTED by earlier clean turns stay: an errored turn
