@@ -297,6 +297,81 @@ def _compact_predict(samples, pre_tokens):
     return pad(med, _compact_quantile(ds, _COMPACT_ETA_Q) - med)
 
 
+# ── telling two screenshots apart ─────────────────────────────────────────────
+# Auto-shot attaches a capture to EVERY message, and each one costs ~1.5-2.5k vision tokens
+# that then sit in the context for the rest of the conversation — on a long session the
+# screenshots, not the words, are what fills the window. Byte-equality is nearly useless
+# against that: four consecutive grabs of a screen nobody touched produced four different
+# sha256s (measured 2026-08 — a live desktop is never bit-for-bit still), so the cheap test
+# almost never fires and every message pays for a picture the model already has. So compare
+# what the capture LOOKS like instead, with a difference hash over a luma grid — each bit
+# says "this cell is brighter than the one to its right". At 32 cells wide a caret or a clock
+# digit averages away to far less than one cell (the same four grabs were 0 bits apart),
+# while anything worth re-sending moves whole regions and flips bits by the dozen. A finer
+# grid doesn't sharpen the distinction — 48 and 64 wide were measured too, and a localized
+# change stays localized at every resolution — so the coarsest one wins on cost.
+_SHOT_HASH_SIDE = 32              # 32×32 left-to-right comparisons = 1024 bits of fingerprint
+
+
+def _shot_phash(path):
+    """1024-bit perceptual fingerprint of an image file, or None if it can't be read.
+
+    None means "no opinion", never "unchanged": callers fall back to byte-equality rather
+    than guess, because a wrong "unchanged" points the model at an image it was never sent."""
+    try:
+        with Image.open(path) as im:
+            # BOX = plain area averaging. A sharper filter (LANCZOS) rings around edges and
+            # would let a one-pixel caret swing a whole cell — the opposite of what's wanted.
+            g = im.convert("L").resize((_SHOT_HASH_SIDE + 1, _SHOT_HASH_SIDE), Image.BOX)
+        px = g.tobytes()          # mode "L" → one unpadded byte per pixel, row-major
+        w = _SHOT_HASH_SIDE + 1
+        bits = 0
+        for y in range(_SHOT_HASH_SIDE):
+            row = y * w
+            for x in range(_SHOT_HASH_SIDE):
+                bits = (bits << 1) | (px[row + x] > px[row + x + 1])
+        return bits
+    except Exception:
+        return None
+
+
+def _shot_looks_same(a, b):
+    """True when two fingerprints differ by at most SHOT_DEDUPE_BITS of the 1024."""
+    if a is None or b is None or SHOT_DEDUPE_BITS <= 0:
+        return False
+    return bin(a ^ b).count("1") <= SHOT_DEDUPE_BITS
+
+
+# ── how fast the context window is being spent ────────────────────────────────
+# A bare "context 46%" answers a question nobody asks. What people want to know is whether
+# they can keep going, and the unit they spend is the turn — so track where the window stood
+# at the end of each recent turn and quote the slope in turns remaining.
+_CTX_RATE_TURNS = 6               # rolling window the burn rate is averaged over
+_CTX_WARN_PCT = 70.0              # amber, and a one-time note suggesting an early compaction
+_CTX_HOT_PCT = 85.0               # red, and a second, louder note
+
+
+# ── how much of the allowance is left ─────────────────────────────────────────
+# The gauge above measures the size of the CONVERSATION. What actually ends a session is the
+# 5-hour/weekly allowance, and the two are unrelated: every message spends from the
+# allowance, but Clear and /compact hand the context reading back while the spend stays
+# spent. So a window that never rises past a few percent can sit next to an allowance that's
+# nearly gone — which is precisely how you get cut off with no warning, and why the context
+# number can't be the one on display. The CLI knows the real figure and emits it on every
+# status transition (RateLimitEvent → the worker's "quota"); the statusline gives it the slot
+# and lends it back to context only when context is itself over its warning line, so the row
+# never carries two percentages competing to be the one you should worry about.
+_QUOTA_WINDOWS = {"five_hour": "5h", "seven_day": "week", "seven_day_opus": "week/opus",
+                  "seven_day_sonnet": "week/sonnet", "overage": "overage"}
+_QUOTA_HOT = 0.90                 # colour by the number shown, even if the CLI still says
+                                  # "allowed" — a grey 94% reads as nothing being wrong
+_RETRY_POLL_MS = 60_000           # how often an armed retry checks the clock. A single long
+                                  # after() would be the obvious choice and the wrong one: Tk
+                                  # timers don't run while the machine sleeps, so a laptop
+                                  # closed for the afternoon would wake owing hours of delay.
+                                  # Re-reading the wall clock can't drift that way.
+
+
 def _startup_permission_mode():
     """Decide this launch's permission state: (read_only, mode to LAUNCH the worker in).
     The remembered Read-only toggle — a deliberate user choice, like Window-only — wins
@@ -344,13 +419,13 @@ class Overlay:
         self.pending_shot = None
         self.pending_images: list = []
         self._precaptured = None        # (shots, monotonic_ts) grabbed while typing
-        self._sent_shot_hashes: dict = {}  # capture-target key → sha256 of the last shot
-                                        # the model VERIFIABLY has in context; lets auto-
-                                        # screenshot skip re-attaching a byte-identical screen
-                                        # (see _dedupe_shots). Cleared whenever the context may
-                                        # have lost the image (clear/compact — explicit OR the
-                                        # CLI's automatic one — reconnect, resume fallback,
-                                        # any error).
+        self._sent_shot_hashes: dict = {}  # capture-target key → (sha256, perceptual hash) of
+                                        # the last shot the model VERIFIABLY has in context;
+                                        # lets auto-screenshot skip re-attaching a screen that
+                                        # hasn't visibly changed (see _dedupe_shots). Cleared
+                                        # whenever the context may have lost the image
+                                        # (clear/compact — explicit OR the CLI's automatic one
+                                        # — reconnect, resume fallback, any error).
         self._pending_shot_hashes: dict = {}  # hashes of shots attached to the IN-FLIGHT turn;
                                         # promoted into _sent_shot_hashes only when that turn
                                         # returns a clean result. A turn that errors or is
@@ -3686,12 +3761,13 @@ class Overlay:
         self._refresh_attach()
         self.entry.delete("1.0", "end")
         self._ph_active = False
-        # Auto-screenshots only: drop any capture that is byte-identical to the last one
-        # SENT for the same target — the model already has that exact image in context, so
-        # re-attaching it buys nothing and costs real latency (measured 2026-08: +0.7-2.6s
-        # TTFT per message for one monitor's inline image). A manual Snap is an explicit
-        # "attach it" and is never deduped. Legacy "read" mode isn't either: its old file
-        # may already be pruned from disk, so "refer to the previous one" can dangle.
+        # Auto-screenshots only: drop any capture that the model already has — the same bytes,
+        # or (far more often, since a live desktop never re-encodes identically) the same
+        # picture. Re-attaching buys nothing and costs real latency (measured 2026-08:
+        # +0.7-2.6s TTFT per message for one monitor's inline image) plus vision tokens that
+        # stay spent for the rest of the conversation. A manual Snap is an explicit "attach
+        # it" and is never deduped. Legacy "read" mode isn't either: its old file may already
+        # be pruned from disk, so "refer to the previous one" can dangle.
         unchanged = []
         if self.auto_shot and shots and IMAGE_INPUT == "inline":
             shots, unchanged = self._dedupe_shots(shots)
@@ -3723,12 +3799,18 @@ class Overlay:
         return ("window",) if s.get("window") is not None else ("mon", s.get("index"))
 
     def _dedupe_shots(self, shots):
-        """Split auto-captured shots into (changed, unchanged) against the last hash the
-        model verifiably has, and stage the new hashes as PENDING — they're promoted only
+        """Split auto-captured shots into (changed, unchanged) against the last fingerprint
+        the model verifiably has, and stage the new ones as PENDING — they're promoted only
         when the turn returns a clean result (see _handle "result"/"turn_done"), because a
         turn that errors out or is stopped may never have delivered the image. Any read
         failure counts as changed — when in doubt, attach (a stale "unchanged" pointer is
-        worse than 1s extra)."""
+        worse than 1s extra).
+
+        Two tests, cheapest first: identical bytes, then _shot_phash for the far more common
+        case of a screen that hasn't meaningfully changed but re-encodes differently anyway.
+        Comparison is always against the BASELINE the model holds, not against the previous
+        capture, so a screen drifting a bit per turn still re-attaches once the accumulated
+        drift matters — which is the honest reading of "has this changed since you saw it"."""
         keep, unchanged = [], []
         for s in shots:
             try:
@@ -3736,11 +3818,18 @@ class Overlay:
             except Exception:
                 keep.append(s)
                 continue
-            if self._sent_shot_hashes.get(self._shot_key(s)) == digest:
+            key = self._shot_key(s)
+            prev = self._sent_shot_hashes.get(key)
+            prev_sha, prev_look = prev if isinstance(prev, tuple) else (prev, None)
+            if prev_sha == digest:
                 unchanged.append(s)
-            else:
-                keep.append(s)
-                self._pending_shot_hashes[self._shot_key(s)] = digest
+                continue
+            look = _shot_phash(s["path"])     # only worth decoding once the bytes differ
+            if _shot_looks_same(prev_look, look):
+                unchanged.append(s)
+                continue
+            keep.append(s)
+            self._pending_shot_hashes[key] = (digest, look)
         return keep, unchanged
 
     def _forget_sent_shots(self):
