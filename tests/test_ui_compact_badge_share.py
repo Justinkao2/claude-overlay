@@ -1,13 +1,17 @@
 """UI feature tests for:
   - _format_compact_result
   - Compact state machine (_start_compact_anim / _compact_tick / _stop_compact_anim)
+  - Compact ETA (_compact_quantile / _compact_predict / _compact_progress)
   - compact_now() guards
   - Task-done badge (_maybe_flag_done / _set_task_badge)
   - Screen-share toggle (toggle_screen_share / _paint_share_toggle)
   - Auto-shot toggle (toggle_auto / _paint_screen_toggle)
   - Turn-error formatting (_format_turn_error)
 """
+import time
+
 import pytest
+import claude_overlay as co
 from conftest import chat_text
 
 
@@ -136,6 +140,107 @@ def test_stop_compact_anim_unconfirmed(overlay):
     assert overlay._compacting is False
     txt = chat_text(overlay)
     assert "unconfirmed" in txt.lower() or "couldn" in txt or "confirm" in txt
+
+
+# ── Compact ETA ───────────────────────────────────────────────────────────────
+
+def test_compact_quantile_single_and_interpolated():
+    assert co._compact_quantile([], 0.8) == 0.0
+    assert co._compact_quantile([7.0], 0.8) == 7.0
+    # 0.5 across [0, 10, 20] lands exactly on the middle sample; 0.75 halfway past it
+    assert co._compact_quantile([0.0, 10.0, 20.0], 0.5) == 10.0
+    assert co._compact_quantile([0.0, 10.0, 20.0], 0.75) == 15.0
+
+
+def test_compact_predict_none_without_samples():
+    assert co._compact_predict([], 50_000) is None
+    assert co._compact_predict([(0, 12.0), (40_000, 0)], 50_000) is None   # junk rows dropped
+
+
+def test_compact_predict_pads_above_the_fit():
+    """Samples on a perfect line leave zero residual, so only the floor pad applies — but it
+    must apply, because a 2-point fit is exactly where confidence is lowest."""
+    pts = [(20_000, 100.0), (40_000, 200.0)]
+    assert co._compact_predict(pts, 30_000) == pytest.approx(150.0 * (1 + co._COMPACT_ETA_PAD))
+
+
+def test_compact_predict_pads_by_residual_spread_when_noisy():
+    """A scattered sample set should buy MORE headroom than the flat floor pad."""
+    pts = [(20_000, 100.0), (40_000, 120.0), (60_000, 400.0), (80_000, 180.0)]
+    fit = 200.0                       # by symmetry the line through these lands on mean(y) at 50k
+    assert co._compact_predict(pts, 50_000) > fit * (1 + co._COMPACT_ETA_PAD)
+
+
+def test_compact_predict_median_fallback_is_padded():
+    # One sample ⇒ no fit; same-size samples ⇒ no slope. Both land on the median branch.
+    assert co._compact_predict([(50_000, 100.0)], 50_000) > 100.0
+    assert co._compact_predict([(50_000, 100.0), (50_000, 140.0)], 50_000) > 120.0
+
+
+def test_compact_predict_clamped():
+    assert co._compact_predict([(50_000, 0.5)], 50_000) == co._COMPACT_ETA_MIN
+    assert co._compact_predict([(50_000, 5000.0)], 50_000) == co._COMPACT_ETA_MAX
+
+
+def test_compact_progress_monotonic_and_capped(overlay):
+    f = overlay._compact_progress
+    assert f(0, 100) == 0.0
+    assert f(-5, 100) == 0.0          # clock skew must not go negative
+    assert f(50, 100) == pytest.approx(0.45)
+    assert f(100, 100) == pytest.approx(0.90)
+    assert f(500, 100) == pytest.approx(0.90)   # never runs away past the prediction
+    assert f(50, 0) == 0.0            # no ETA ⇒ nothing to be a fraction of
+
+
+def test_compact_progress_never_fills_the_bar(overlay):
+    """A visually full bar would claim a completion only the CLI's done event can prove."""
+    for elapsed in (99, 100, 101, 400):
+        assert "░" in overlay._compact_bar_filled(overlay._compact_progress(elapsed, 100))
+
+
+def _tick_once(ov, eta, elapsed):
+    """Render one banner frame as if `elapsed` seconds had passed against `eta`."""
+    ov._start_compact_anim()
+    ov._compact_eta = eta
+    ov._compact_t0 = time.monotonic() - elapsed
+    if ov._compact_anim_after is not None:
+        ov.root.after_cancel(ov._compact_anim_after)
+        ov._compact_anim_after = None
+    ov._compact_tick()
+    return chat_text(ov)
+
+
+def test_compact_tick_shows_percentage_before_the_eta(overlay):
+    try:
+        txt = _tick_once(overlay, 100.0, 50.0)
+        assert "45%" in txt
+        assert "Compacting conversation" in txt
+    finally:
+        _stop_anim(overlay)
+
+
+def test_compact_tick_past_eta_drops_the_percentage(overlay):
+    """Past the prediction there is no honest percentage left: a bar creeping 97 → 98 % looks
+    hung. Say we're still going and show the one number we actually measured."""
+    try:
+        txt = _tick_once(overlay, 100.0, 142.0)
+        assert "%" not in txt
+        assert "Still compacting" in txt
+        assert "2m22s" in txt
+    finally:
+        _stop_anim(overlay)
+
+
+def test_compact_tick_without_eta_shows_elapsed(overlay):
+    try:
+        txt = _tick_once(overlay, None, 30.0)
+        assert "%" not in txt
+        assert "30s" in txt
+        # Nothing was ever predicted, so there's no expectation to have exceeded.
+        assert "Still compacting" not in txt
+        assert "Compacting conversation" in txt
+    finally:
+        _stop_anim(overlay)
 
 
 # ── compact_now() guards ──────────────────────────────────────────────────────

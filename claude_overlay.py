@@ -18,8 +18,10 @@ import ctypes
 import hashlib
 import ctypes.wintypes as wt
 import json
+import math
 import os
 import re
+import statistics
 import sys
 import threading
 import time
@@ -179,6 +181,122 @@ def _save_state(**updates):
         pass
 
 
+# ── predicting how long a /compact will take ──────────────────────────────────
+# The CLI streams NOTHING while it compacts (see COMPACT_IDLE_TIMEOUT) — no percentage, no
+# stage events — so real progress is unknowable. What IS knowable is how long compactions
+# of a given size have taken before: every one leaves a `compact_boundary` line carrying
+# compactMetadata.preTokens + durationMs. We remember our own runs in STATE_FILE and, on a
+# machine that hasn't compacted through the overlay yet, mine the CLI's transcripts, so
+# even the first run can show an honest estimate instead of an unlabelled spinner.
+_COMPACT_HIST_MAX = 10            # rolling window of remembered runs
+_COMPACT_SCAN_FILES = 12          # newest transcripts only, when seeding from the CLI's logs
+_COMPACT_ETA_MIN = 10.0
+_COMPACT_ETA_MAX = 900.0
+_COMPACT_ETA_Q = 0.80             # aim the estimate here, not at the middle (see _compact_predict)
+_COMPACT_ETA_PAD = 0.15           # …and never less than this much headroom, however tight the fit
+
+
+def _compact_history():
+    """Remembered (pre_tokens, duration_sec) pairs from this overlay's own compactions."""
+    raw = _load_state().get("compact_runs")
+    out = []
+    if isinstance(raw, list):
+        for it in raw[-_COMPACT_HIST_MAX:]:
+            try:
+                pre, dur = int(it[0]), float(it[1])
+            except Exception:
+                continue          # hand-edited / older-format entry — just skip it
+            if pre > 0 and dur > 0:
+                out.append((pre, dur))
+    return out
+
+
+def _compact_history_add(pre_tokens, duration_sec):
+    """Append one completed run, keeping only the most recent _COMPACT_HIST_MAX."""
+    try:
+        pre, dur = int(pre_tokens), float(duration_sec)
+    except Exception:
+        return
+    if pre <= 0 or dur <= 0:
+        return
+    runs = _compact_history() + [(pre, round(dur, 1))]
+    _save_state(compact_runs=[list(r) for r in runs[-_COMPACT_HIST_MAX:]])
+
+
+def _compact_samples_from_transcripts():
+    """(pre_tokens, duration_sec) pairs recovered from the CLI's own session logs. Purely
+    best-effort — an unreadable file or a malformed line is skipped, [] on any failure."""
+    out = []
+    try:
+        files = sorted(sessions.TRANSCRIPT_ROOT.glob("*/*.jsonl"),
+                       key=lambda f: f.stat().st_mtime, reverse=True)[:_COMPACT_SCAN_FILES]
+    except Exception:
+        return out
+    for f in files:
+        try:
+            with f.open(encoding="utf-8", errors="replace") as fh:
+                for ln in fh:
+                    if "compact_boundary" not in ln:   # cheap reject before the JSON parse
+                        continue
+                    try:
+                        md = json.loads(ln).get("compactMetadata") or {}
+                    except Exception:
+                        continue
+                    pre, ms = md.get("preTokens"), md.get("durationMs")
+                    if isinstance(pre, (int, float)) and isinstance(ms, (int, float))                             and pre > 0 and ms > 0:
+                        out.append((int(pre), ms / 1000.0))
+        except Exception:
+            continue              # log rotated away mid-read, permissions, etc.
+    return out
+
+
+def _compact_quantile(values, q):
+    """Linearly-interpolated quantile. statistics.quantiles() wants n ≥ 2 and returns cut
+    points between groups; here a single sample has to work too, so do it by hand."""
+    vs = sorted(values)
+    if not vs:
+        return 0.0
+    if len(vs) == 1:
+        return vs[0]
+    pos = q * (len(vs) - 1)
+    lo = min(int(pos), len(vs) - 2)
+    return vs[lo] + (vs[lo + 1] - vs[lo]) * (pos - lo)
+
+
+def _compact_predict(samples, pre_tokens):
+    """Predicted /compact duration in seconds, or None when there's nothing to go on.
+
+    Measured runs (61k tokens → 96s, 283k → 167s) say duration is mostly a FIXED cost plus a
+    small per-token term, so scaling straight off the context size would badly underestimate
+    small compactions. With two or more differently-sized samples we least-squares fit
+    duration = a + b·tokens; otherwise we fall back to the median duration, which ignores
+    size but still beats having no estimate at all.
+
+    Both of those are CENTRE estimates, which by construction half of all runs overshoot —
+    and overshooting reads far worse than finishing early, because the bar stalls with no way
+    to say how much longer. So aim at the _COMPACT_ETA_Q quantile instead: pad the fit by the
+    spread of its own residuals, the median by the spread of the durations. Two samples make
+    the fit pass exactly through both points and three make it nearly so, so a residual-based
+    pad alone would be ~0 exactly when confidence is lowest — hence the _COMPACT_ETA_PAD floor."""
+    pts = [(p, d) for p, d in samples if p > 0 and d > 0]
+    if not pts:
+        return None
+    clamp = lambda v: min(_COMPACT_ETA_MAX, max(_COMPACT_ETA_MIN, v))
+    pad = lambda base, spread: clamp(base + max(spread, base * _COMPACT_ETA_PAD))
+    if isinstance(pre_tokens, (int, float)) and pre_tokens > 0 and len(pts) >= 2:
+        xs, ys = [p for p, _ in pts], [d for _, d in pts]
+        mx, my = statistics.fmean(xs), statistics.fmean(ys)
+        var = sum((x - mx) ** 2 for x in xs)
+        if var > 0:               # zero ⇒ every sample the same size, no slope to fit
+            b = sum((x - mx) * (y - my) for x, y in pts) / var
+            a = my - b * mx
+            resid = [y - (a + b * x) for x, y in pts]
+            return pad(a + b * pre_tokens, _compact_quantile(resid, _COMPACT_ETA_Q))
+    ds = [d for _, d in pts]
+    med = statistics.median(ds)
+    return pad(med, _compact_quantile(ds, _COMPACT_ETA_Q) - med)
+
+
 def _startup_permission_mode():
     """Decide this launch's permission state: (read_only, mode to LAUNCH the worker in).
     The remembered Read-only toggle — a deliberate user choice, like Window-only — wins
@@ -325,6 +443,8 @@ class Overlay:
         self._compact_anim_after = None   # pending animation timer id
         self._compact_t0 = 0.0            # monotonic start (for the elapsed-seconds counter)
         self._compact_frame = 0
+        self._compact_pre = None          # context size (tokens) this run is compacting
+        self._compact_eta = None          # predicted duration in s; None → no basis to guess
 
         self._build()
         self._register_hotkey()
@@ -4130,7 +4250,7 @@ class Overlay:
             text=f"{self._model or 'Claude'} ▾   ·   context {p}   ·   {ver}", fg=T["muted"])
 
     # ── compaction animation (mirrors the Claude Code CLI's /compact spinner) ──
-    def _start_compact_anim(self):
+    def _start_compact_anim(self, payload=None):
         """Animate a one-line banner in the chat and pulse it until compaction finishes,
         then rewrite that same line as the result. It's REAL Text content (not an embedded
         widget), so it word-wraps with the window width and zooms with Ctrl +/−. The line is
@@ -4143,6 +4263,11 @@ class Overlay:
         self.chat.tag_configure("compact", foreground=T["accent"], font=self.f_chip,
                                 lmargin1=self.px(18), lmargin2=self.px(18), rmargin=self.px(14),
                                 spacing1=self.px(6), spacing3=self.px(4))
+        # The bar rides in the mono font so its cells stay aligned at any zoom, and holds a
+        # steady accent while the sparkle/elapsed pulse around it (raised so its font+colour
+        # win over "compact", which _compact_tick recolours every frame).
+        self.chat.tag_configure("compact_bar", foreground=T["accent"], font=self.f_mono)
+        self.chat.tag_raise("compact_bar")
         self.chat.insert("end", "\n")
         start = self.chat.index("end-1c")           # start of our (about-to-be-written) line
         self.chat.insert("end", " \n", "compact")
@@ -4151,9 +4276,37 @@ class Overlay:
         self._compact_line = True
         self._compact_t0 = time.monotonic()
         self._compact_frame = 0
+        # How big the thing being compacted is (the worker reads it off the last context
+        # measurement), and therefore roughly how long this should take.
+        pre = payload.get("pre_tokens") if isinstance(payload, dict) else None
+        self._compact_pre = int(pre) if isinstance(pre, (int, float)) and pre > 0 else None
+        own = _compact_history()
+        self._compact_eta = _compact_predict(own, self._compact_pre)
+        if len(own) < 2:
+            # Under two runs of our own there's no line to fit, so the estimate above (if any)
+            # ignores size. Go mine the CLI's transcripts for more.
+            self._seed_compact_eta()
         self._set_status("compacting…")
         self._scroll_follow()
         self._compact_tick()
+
+    def _seed_compact_eta(self):
+        """Too few compactions of our own to fit one: fall back to the durations recorded in
+        the CLI's own session logs (which include any the overlay already drove). Reading a
+        dozen of them takes ~0.5s — nothing next to a compaction that runs for minutes, but
+        far too long to block the UI — so it happens off-thread, and the banner runs on
+        whatever we had until this lands."""
+        pre = self._compact_pre
+
+        def work():
+            try:
+                samples = _compact_samples_from_transcripts()
+                eta = _compact_predict(samples, pre) if len(samples) >= 2 else None
+            except Exception:
+                return
+            if eta is not None:
+                self.ui_q.put(("compact_eta", eta))
+        threading.Thread(target=work, name="compact-eta", daemon=True).start()
 
     def _compact_tick(self):
         if not self._compacting or not self._compact_line:
@@ -4161,18 +4314,71 @@ class Overlay:
         frames = "✶✷✸✹✺✹✸✷"             # a sparkle that pulses (same ✦/✻ family as the rest of the UI)
         i = self._compact_frame
         spark = frames[i % len(frames)]
-        dots = "." * (i % 4)
-        el = int(time.monotonic() - self._compact_t0)
+        t = time.monotonic() - self._compact_t0
+        eta = self._compact_eta
+        if eta and t < eta:
+            frac = self._compact_progress(t, eta)
+            # The percentage already carries the elapsed/predicted pair (it IS elapsed over the
+            # prediction), so showing both said the same thing twice and wrapped the line.
+            label, bar = "Compacting conversation", self._compact_bar_filled(frac)
+            tail = f"   {frac * 100:.0f}%"
+        else:
+            # No prediction, or one we've already run past. Either way there's no honest
+            # percentage left — a bar creeping 97 → 98 % looks hung and reads as *worse* than
+            # admitting we don't know. So say so, circulate the band again, and put back the
+            # one number we actually measured.
+            label = "Still compacting" if eta else "Compacting conversation"
+            bar, tail = self._compact_bar(i), f"   {self._compact_elapsed(t)}"
         try:
             self.chat.delete("compact_ln", "compact_ln lineend")
-            self.chat.insert("compact_ln", f"{spark}  Compacting conversation{dots}   ({el}s)",
-                             "compact")
+            self.chat.insert("compact_ln", f"{spark}  {label}   ", "compact",
+                             bar, ("compact", "compact_bar"),
+                             tail, "compact")
             self.chat.tag_configure(
                 "compact", foreground=(T["accent"] if (i // 2) % 2 == 0 else T["accent_hi"]))
         except tk.TclError:
             return                        # line/mark gone (chat cleared) → stop quietly
         self._compact_frame = i + 1
         self._compact_anim_after = self.root.after(110, self._compact_tick)
+
+    # /compact emits no progress events, so a *measured* percentage is impossible. Where we
+    # have past timings the bar fills against a PREDICTED duration; where we don't — or once
+    # a run outlives that prediction — a band circulates the track instead, which is honest
+    # "working, duration unknown" motion rather than a number pretending to still mean something.
+    # 18 cells at the 110ms tick means one full lap every ~2s, and each cell is ~5.5%.
+    _COMPACT_BAR_CELLS = 18
+    _COMPACT_BAR_BAND = 6
+
+    def _compact_bar_filled(self, frac):
+        # Floor, not round: _compact_progress never returns 1.0, so flooring guarantees the
+        # last cell stays empty until the CLI actually reports done — a visually FULL bar
+        # would claim a completion we haven't been told about.
+        w = self._COMPACT_BAR_CELLS
+        n = max(0, min(w, int(frac * w)))
+        return "█" * n + "░" * (w - n)
+
+    @staticmethod
+    def _compact_progress(elapsed, eta):
+        """Fraction of the predicted duration, 0 ≤ f ≤ 0.90 — linear, and capped short of the
+        end because only the CLI's done event proves a compaction actually finished. Callers
+        only use this up to the prediction; past it they drop the percentage rather than
+        invent more of it."""
+        if eta <= 0:
+            return 0.0
+        return 0.90 * max(0.0, min(1.0, elapsed / eta))
+
+    def _compact_bar(self, frame):
+        w, b = self._COMPACT_BAR_CELLS, self._COMPACT_BAR_BAND
+        cells = ["░"] * w
+        for k in range(b):
+            cells[(frame + k) % w] = "█"
+        return "".join(cells)
+
+    @staticmethod
+    def _compact_elapsed(sec):
+        """Bare seconds while short; m+s once a compaction runs past a minute."""
+        sec = max(0, int(sec))
+        return f"{sec}s" if sec < 60 else f"{sec // 60}m{sec % 60:02d}s"
 
     def _stop_compact_anim(self, payload):
         self._compacting = False
@@ -4190,8 +4396,17 @@ class Overlay:
             detail = payload.get("detail")
         else:
             status, meta, detail = "ok", payload, None
+        took = time.monotonic() - self._compact_t0
         if status == "ok":
-            final = self._format_compact_result(meta)
+            # The CLI's own duration_ms is authoritative (it excludes our queueing); the wall
+            # clock is the fallback. Remembering (size, duration) is what lets the NEXT
+            # compaction show a progress bar instead of a bare spinner.
+            m = meta if isinstance(meta, dict) else {}
+            ms = m.get("duration_ms")
+            if isinstance(ms, (int, float)) and ms > 0:
+                took = ms / 1000.0
+            _compact_history_add(m.get("pre_tokens") or self._compact_pre, took)
+            final = self._format_compact_result(meta, took)
         elif status == "unconfirmed":
             final = "⚠ Compaction finished, but success couldn't be confirmed — context may be unchanged."
             if detail:
@@ -4226,16 +4441,19 @@ class Overlay:
             self.add_sys(final)
         self._refresh_statusline()
 
-    def _format_compact_result(self, meta):
+    def _format_compact_result(self, meta, took=None):
+        # The duration isn't decoration: it's the sample the next run's estimate is built on,
+        # so showing it lets the user see the prediction converge.
+        el = f" in {self._compact_elapsed(took)}" if took else ""
         if isinstance(meta, dict) and meta.get("pre_tokens") and meta.get("post_tokens"):
             try:
                 pre, post = int(meta["pre_tokens"]), int(meta["post_tokens"])
                 saved = (1 - post / pre) * 100 if pre else 0
-                return (f"✦ Compacted — {pre:,} → {post:,} tokens "
+                return (f"✦ Compacted{el} — {pre:,} → {post:,} tokens "
                         f"(saved {saved:.0f}%). History summarized; keep going.")
             except Exception:
                 pass
-        return "✦ Compacted — conversation history summarized; keep going."
+        return f"✦ Compacted{el} — conversation history summarized; keep going."
 
     def _model_menu(self, e):
         m = tk.Menu(self.root, tearoff=0, bg=T["field"], fg=T["text"],
@@ -4462,7 +4680,13 @@ class Overlay:
                     pass
                 self._resume_btn = None
         elif kind == "compacting":
-            self._start_compact_anim()
+            self._start_compact_anim(payload)
+        elif kind == "compact_eta":
+            # Size-aware estimate mined from the CLI's transcripts, arriving a beat into the run
+            # (see _seed_compact_eta). It's fitted to two or more samples, so it supersedes the
+            # size-blind median we may have started with — but only while the run is still live.
+            if self._compacting:
+                self._compact_eta = payload
         elif kind == "compact_done":
             self._stop_compact_anim(payload)
             # Compaction may summarize the previous screenshot right out of the context;

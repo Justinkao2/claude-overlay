@@ -80,6 +80,10 @@ class ClaudeWorker(threading.Thread):
         self._client: ClaudeSDKClient | None = None
         self._running = True
         self._saw_stream = False
+        # Last context size seen by _emit_usage, in tokens. /compact reports no progress,
+        # so the UI predicts its duration from the size of what's being summarized; this
+        # is that input, captured for free on a measurement the worker already takes.
+        self._ctx_tokens = None
         self._lifecycle_task = None   # the in-flight connect()/disconnect() task, if any
         # Concrete id the family alias (config.MODEL) resolves to. Resolved once in run()
         # before the event loop starts; defaults to the raw alias so nothing breaks if
@@ -674,8 +678,12 @@ class ClaudeWorker(threading.Thread):
             dm = self._display_model(served=served)
             if dm:
                 self.ui.put(("model", dm))
-            if isinstance(u, dict) and u.get("percentage") is not None:
-                self.ui.put(("ctx", u["percentage"]))
+            if isinstance(u, dict):
+                tot = u.get("totalTokens")
+                if isinstance(tot, (int, float)) and tot > 0:
+                    self._ctx_tokens = int(tot)
+                if u.get("percentage") is not None:
+                    self.ui.put(("ctx", u["percentage"]))
         except Exception:
             pass
 
@@ -834,7 +842,9 @@ class ClaudeWorker(threading.Thread):
                          {"status": "error", "meta": None,
                           "detail": "not connected (check `claude --version`)"}))
             return
-        self.ui.put(("compacting", None))   # → UI starts the animation
+        # Size of what we're about to compact → the UI predicts how long this run will
+        # take from how long past runs of a similar size took (the CLI sends no progress).
+        self.ui.put(("compacting", {"pre_tokens": self._ctx_tokens}))
         agen = None
         meta = None
         status = "ok"
