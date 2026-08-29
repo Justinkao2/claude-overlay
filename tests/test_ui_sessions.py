@@ -40,13 +40,19 @@ class FakeStore:
 
 
 def _cards(ov):
-    """Embedded session cards currently in the transcript, oldest-added first."""
+    """Embedded session cards currently in the transcript, TOP-DOWN.
+
+    Sorted by their position in the Text widget, not by the order `window names` happens to
+    return them in: that is Tk's hash order, which for the auto-generated widget names looks
+    like creation order right up until the tenth canvas of the session, when `.!canvas10`
+    sorts before `.!canvas2` and "card 0" silently becomes a different card."""
     out = []
     for name in ov.chat.window_names():
         w = ov.chat.nametowidget(name)
         if hasattr(w, "_arm") and hasattr(w, "_state"):
-            out.append(w)
-    return out
+            line, col = ov.chat.index(name).split(".")
+            out.append(((int(line), int(col)), w))
+    return [w for _pos, w in sorted(out, key=lambda p: p[0])]
 
 
 def _folds(ov):

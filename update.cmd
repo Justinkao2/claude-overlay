@@ -291,6 +291,19 @@ if errorlevel 1 (
 echo [OK] The app loads.
 
 echo.
+rem OV_UPDATE_AUTO is set by win32utils.run_overlay_update -- i.e. we were started BY a running
+rem overlay's one-click Update button, which waits on this process and then restarts itself.
+rem The `pause` below would make that wait last until somebody walked over and pressed a key,
+rem with the button stuck on "Updating..." the whole time and an update that had ALREADY
+rem SUCCEEDED looking hung. So on the automated path we say what happens next and get out of
+rem the way. Only THIS success exit is skipped: every failure path above still pauses, because
+rem the console is where the fix is written and closing it would take the fix with it.
+if defined OV_UPDATE_AUTO (
+  echo ============================================================
+  echo   [OK] Updated. The overlay restarts itself now.
+  echo ============================================================
+  exit /b 0
+)
 echo ============================================================
 echo   [OK] Updated. IMPORTANT: close the running overlay and
 echo   re-open it ^("Start Claude Overlay.cmd"^) for the changes
