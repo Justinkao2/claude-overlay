@@ -3,6 +3,34 @@
 All notable changes to Claude Overlay are documented here.
 This project follows [Semantic Versioning](https://semver.org/).
 
+## [1.18.0] - 2026-08-29
+
+Scroll-follow rework, contributed by [@Justinkao2](https://github.com/Justinkao2)
+(the overlay's first external code PR — thank you!).
+
+### Fixed
+- **Streaming replies can no longer be silently stranded below the fold.** Whether to
+  auto-scroll used to be re-derived on every insert from `yview()[1] > 0.999`, which
+  only reads true when the view is pinned to the exact bottom. Any content-driven
+  drift — a throttled giant line, an embedded table or user bubble, a window resize —
+  left the view a hair short, read as "the user scrolled away", and the rest of the
+  reply streamed in off-screen with nothing to say it had arrived. Following is now a
+  **mode**: only a real user scroll gesture (wheel, scrollbar drag/click, keyboard
+  nav) turns it off, scrolling back to the end resumes it, and sending a new message
+  snaps it back on.
+- Turn-end catch-up honours the follow mode instead of the old loose `> 0.90`
+  heuristic, so a throttled giant line still lands on the end while a reader who
+  scrolled up is left alone.
+
+### Added
+- **"↓ New output" jump pill.** Deliberately scrolling away during streaming is now a
+  state that can persist, so a pill floats over the bottom-right of the transcript
+  when you are away from the end — reading "↓ New output" once unseen output has
+  landed ("↓ Latest" otherwise) — and one click takes you back. It reads the cached
+  scrollbar fraction rather than calling `yview()`, which is O(line length) on a
+  pathological newline-free line (the v1.1.9-class freeze).
+- 7 tests locking down the follow mode and the pill (`tests/test_ui_scroll_follow.py`).
+
 ## [1.17.0] - 2026-08-20
 
 Response-speed work, driven by a benchmark of the overlay against the Claude Code CLI
