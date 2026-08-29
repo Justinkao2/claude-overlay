@@ -812,3 +812,138 @@ def test_python_where_setup_installs_it_but_not_on_path_still_launches(tmp_path)
         f"\n--- output ---\n{out}")
     assert marker.read_text().lower() == str(fabricated).lower(), (
         f"launched something other than the discovered interpreter: {marker.read_text()}")
+
+
+# ---------------------------------------------------------------------------------
+# Behavioural: WHERE update.cmd pulls from, and what it refuses to pull onto.
+#
+# Through v1.17.0 the pull was a bare `git pull`, which pulls the current branch from ITS
+# tracking remote. On a clone that is a FORK that remote is the fork -- and a fork is
+# exactly as stale as the install, while the version check asks GitHub for the newest tag
+# on the SOURCE repo. So the overlay correctly announced a new release and every pull
+# behind the one-click button was a no-op against a fork that did not have it: the update
+# reported success, changed nothing, and the notice came back on the next launch. Nothing
+# in the text of the script looked wrong, which is why these run the real update.cmd
+# against real git repositories instead of reading it.
+#
+# The driver copy is kept OUTSIDE the sandbox and the sandbox holds a stub update.cmd for
+# the --finish hand-off, so the pull half runs for real without installing anything. The
+# stub is untracked on purpose: no pull can replace it, and the dirty-tree guard must not
+# trip over it either, since a pull never overwrites untracked files.
+# ---------------------------------------------------------------------------------
+
+_GIT_ID = ("-c", "user.email=t@example.invalid", "-c", "user.name=t",
+           "-c", "commit.gpgsign=false")
+
+
+def _git(cwd, *args):
+    p = subprocess.run(("git",) + args, cwd=str(cwd), capture_output=True,
+                       text=True, timeout=90)
+    assert p.returncode == 0, f"git {' '.join(args)} in {cwd}:\n{p.stdout}{p.stderr}"
+    return p.stdout
+
+
+def _release(repo, version):
+    (repo / "config.py").write_text(f'__version__ = "{version}"\n', encoding="ascii")
+    _git(repo, "add", "-A")
+    _git(repo, *_GIT_ID, "commit", "-qm", f"v{version}")
+
+
+def _pull_sandbox(tmp_path, forked):
+    """upstream -> (fork) -> app, with upstream one release AHEAD: the shape the bug needed.
+
+    `forked` picks which install is being reproduced. True is this developer's: origin is a
+    personal fork stuck a release back, and `upstream` is where releases come from. False is
+    every ordinary install, where origin IS the source repo and there is no upstream at all;
+    it is here so that fixing the fork case cannot quietly break the common one."""
+    up = tmp_path / "upstream"
+    up.mkdir()
+    _git(up, "init", "-q", "-b", "main")
+    _release(up, "1.0.0")
+    fork = tmp_path / "fork"
+    _git(tmp_path, "clone", "-q", str(up), str(fork))      # and never updated again
+    app = tmp_path / "app"
+    _git(tmp_path, "clone", "-q", str(fork if forked else up), str(app))
+    _release(up, "2.0.0")                                  # the release the fork lacks
+    if forked:
+        _git(app, "remote", "add", "upstream", str(up))
+    (app / "update.cmd").write_text(
+        '@echo off\r\n>"%~dp0finished.txt" echo reached\r\nexit /b 0\r\n', encoding="ascii")
+    driver = tmp_path / "driver"
+    driver.mkdir()
+    shutil.copy(os.path.join(ROOT, "update.cmd"), str(driver / "update.cmd"))
+    return driver, app, dict(os.environ)
+
+
+def _run_pull(tmp_path, driver, app, env):
+    return _run(driver, env, tmp_path, script="update.cmd",
+                args=("--from-temp", str(app)))
+
+
+def _installed(app):
+    return (app / "config.py").read_text(encoding="ascii").strip()
+
+
+@windows_only
+@pytest.mark.parametrize("forked", [True, False])
+def test_update_pulls_from_the_repo_the_version_check_reads(tmp_path, forked):
+    """THE v1.17.0 bug, reproduced end to end for the fork, and pinned for the plain install
+    so the fix cannot be a fork-only special case."""
+    driver, app, env = _pull_sandbox(tmp_path, forked)
+    rc, out = _run_pull(tmp_path, driver, app, env)
+    assert "2.0.0" in _installed(app), (
+        "update.cmd did not bring in the release the version check is announcing "
+        f"(still {_installed(app)!r}) -- an update that succeeds and changes nothing is "
+        f"the one failure that reports itself as success\n--- output ---\n{out}")
+    assert (app / "finished.txt").exists(), (
+        f"pull succeeded but never handed off to the post-pull half\n{out}")
+    assert rc == 0, f"exited {rc} after a clean update\n--- output ---\n{out}"
+
+
+@windows_only
+def test_update_refuses_to_merge_a_release_into_a_topic_branch(tmp_path):
+    """Releases are cut on main. Pulling main onto a topic branch would merge the release
+    into somebody's unfinished work and leave them the merge -- decided by a script running
+    unattended behind a button, which is not a decision it gets to make."""
+    driver, app, env = _pull_sandbox(tmp_path, forked=True)
+    _git(app, "checkout", "-q", "-b", "some/work")
+    # ...and give it a tracking remote, which is what makes this a test. A bare `git pull`
+    # on a branch with nowhere to pull FROM errors by itself, so a topic branch without one
+    # would pass this against the very script that had the bug.
+    _git(app, "push", "-q", "-u", "origin", "some/work")
+    rc, out = _run_pull(tmp_path, driver, app, env)
+    assert "1.0.0" in _installed(app), f"pulled onto a topic branch anyway\n{out}"
+    assert not (app / "finished.txt").exists(), f"carried on past the refusal\n{out}"
+    assert rc != 0, "reported success without updating anything"
+    assert "some/work" in out, (
+        f"refused without naming the branch the user has to leave\n--- output ---\n{out}")
+
+
+@windows_only
+def test_update_refuses_a_dirty_tree_before_the_pull_gets_half_way(tmp_path):
+    """git's own refusal arrives PART WAY THROUGH and names the files without saying what to
+    do about them. The check has to come first, and it has to name the way out."""
+    driver, app, env = _pull_sandbox(tmp_path, forked=True)
+    (app / "config.py").write_text('__version__ = "1.0.0"\n# local edit\n', encoding="ascii")
+    rc, out = _run_pull(tmp_path, driver, app, env)
+    assert "# local edit" in (app / "config.py").read_text(encoding="ascii"), (
+        f"the update overwrote uncommitted work\n--- output ---\n{out}")
+    assert not (app / "finished.txt").exists(), f"carried on past the refusal\n{out}"
+    assert rc != 0, "reported success without updating anything"
+    assert "git stash" in out, (
+        f"refused without telling the user how to proceed\n--- output ---\n{out}")
+
+
+@windows_only
+def test_update_never_makes_a_merge_commit_on_its_own(tmp_path):
+    """A clone carrying local commits on main cannot fast-forward onto the release. Without
+    --ff-only that becomes a merge commit authored by an unattended script; the user has to
+    be the one who decides to merge."""
+    driver, app, env = _pull_sandbox(tmp_path, forked=True)
+    _release(app, "1.0.0-local")
+    before = _git(app, "rev-parse", "HEAD").strip()
+    rc, out = _run_pull(tmp_path, driver, app, env)
+    assert _git(app, "rev-parse", "HEAD").strip() == before, (
+        f"update.cmd rewrote the history of a clone it could not fast-forward\n{out}")
+    assert not (app / "finished.txt").exists(), f"carried on past the refusal\n{out}"
+    assert rc != 0, "reported success without updating anything"

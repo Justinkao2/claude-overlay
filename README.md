@@ -237,8 +237,13 @@ instructions below instead of a button.)
 
 ### 🖱️ One double-click — `update.cmd`
 
-Double-click **`update.cmd`**. It runs `git pull`, refreshes the Python packages, and — if you
-already have a Desktop shortcut — refreshes its icon to match the current version.
+Double-click **`update.cmd`**. It pulls the latest release, refreshes the Python packages,
+and — if you already have a Desktop shortcut — refreshes its icon to match the current version.
+
+It pulls `main` from `upstream` if your clone has that remote and from `origin` otherwise, so
+a **fork** gets the release rather than its own stale copy. It updates only a clean clone
+sitting on `main`: on another branch, or with uncommitted changes, it says so and stops
+instead of merging a release into work in progress.
 
 ### 🛠️ By hand
 
