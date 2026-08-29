@@ -88,11 +88,57 @@ if errorlevel 1 (
   pause & exit /b 1
 )
 
-echo Pulling the latest code...
-git pull
+rem --- WHERE to pull from ------------------------------------------------------------
+rem `git pull` with no arguments pulls the current branch from ITS tracking remote, and on a
+rem clone that is a FORK that remote is the fork -- which is exactly as stale as the install.
+rem Found the hard way: the version check asks GitHub for the newest tag on the SOURCE repo,
+rem so the overlay correctly announced a new release while every pull here was a no-op
+rem against a fork that did not have it. The button worked; there was nothing on the other
+rem end of it, and a pull that succeeds while changing nothing is the one failure mode that
+rem reports itself as success. So pull from `upstream` when the clone has one -- the
+rem conventional name for the repo a fork was made from -- and from `origin` otherwise,
+rem which is every normal install.
+set "SRC=origin"
+git remote get-url upstream >nul 2>nul
+if not errorlevel 1 set "SRC=upstream"
+
+rem --- and ONTO WHAT -----------------------------------------------------------------
+rem Releases are cut on main. Pulling main while checked out on a topic branch would MERGE
+rem the release into somebody's unfinished work and hand them the merge to untangle, which
+rem is not a thing an updater gets to decide. An install parked off main is told to switch.
+rem (A detached HEAD reports as "HEAD" here and lands in the same message, which is right --
+rem it is equally not a branch anything should be pulled into.)
+set "BR="
+for /f "delims=" %%B in ('git rev-parse --abbrev-ref HEAD 2^>nul') do set "BR=%%B"
+if /i not "%BR%"=="main" (
+  echo [X] This clone is on branch "%BR%", not main.
+  echo     Releases live on main, so updating from here would merge the new release
+  echo     into that branch's work. Switch first:
+  echo         git switch main
+  echo     then re-run update.cmd.
+  pause & exit /b 1
+)
+
+rem A dirty tree makes the pull fail PART WAY THROUGH, with git naming the files but not
+rem what to do about them. Say it before anything moves. Untracked files are not checked:
+rem a pull does not overwrite those, and refusing over a stray .log would be a false alarm.
+git diff --quiet HEAD
 if errorlevel 1 (
-  echo [X] git pull failed ^(see above^). If you edited files locally, stash or
-  echo     revert them first, then re-run update.cmd.
+  echo [X] You have uncommitted changes here, and the pull would overwrite them.
+  echo     Commit them, or set them aside with:
+  echo         git stash
+  echo     then re-run update.cmd.
+  pause & exit /b 1
+)
+
+echo Pulling the latest code from %SRC%/main...
+rem --ff-only so an update can only ever move this clone FORWARD onto released code. Without
+rem it, a clone carrying local commits on main gets a merge commit nobody asked for, made by
+rem a script running unattended behind a button.
+git pull --ff-only %SRC% main
+if errorlevel 1 (
+  echo [X] git pull failed ^(see above^). If main here carries commits of its own,
+  echo     it cannot fast-forward onto the release; move them to a branch first.
   pause & exit /b 1
 )
 
