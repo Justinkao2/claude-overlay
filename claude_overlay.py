@@ -487,6 +487,8 @@ class Overlay:
         self._update_available = None     # set to the newer version string if one exists
         self._cli_update_shown = False    # show the "CLI is out of date" notice at most once/session
         self._cli_update_btn_ref = None   # the in-chat Update button, so its result can restyle it
+        self._ov_update_shown = False     # show the "a newer overlay exists" notice at most once
+        self._ov_update_btn_ref = None    # the in-chat Update-overlay button, same restyle path
         self._session_id = None           # the CLI's id for the current conversation (worker
                                           # events); persisted per completed turn so the NEXT
                                           # launch can offer to resume — see _persist_session
@@ -3535,20 +3537,23 @@ class Overlay:
         self._scroll_follow()
         self._prune_chat()
 
-    def _cli_update_btn(self, latest):
-        """One-click 'Update CLI' button embedded in the chat (same embedded-canvas pattern as the
-        Copy button). Click runs `npm install -g @anthropic-ai/claude-code@latest` in a background
-        thread; the button shows 'Updating…' meanwhile and the outcome arrives as a
-        ('cli_update_result', ...) event that restyles it. Forwards the wheel so it can't swallow
-        scrolling (the v1.4.1 embedded-widget trap)."""
-        latest = str(latest)
+    def _one_click_update_btn(self, labels, work, thread_name, btn_attr, result_kind):
+        """Shared builder for the in-chat one-click update buttons — the CLI's and the overlay's
+        own (same embedded-canvas pattern as the Copy button). `labels` gives the text for the four
+        states; a click while idle/error runs `work()` (zero-arg, returns (ok, msg)) on a
+        background thread named `thread_name`, records THIS canvas on `self.<btn_attr>` so the
+        result handler can restyle the button the user actually clicked, and delivers the outcome
+        as a (`result_kind`, (ok, msg)) UI event. A click while 'done' restarts the overlay —
+        neither update takes effect in this process. Forwards the wheel so it can't swallow
+        scrolling (the v1.4.1 embedded-widget trap).
+
+        One builder rather than two: what differs between the CLI button and the overlay button is
+        exactly the five arguments above. The drawing, the zoom re-render, the hover states and
+        the click routing were identical, and a second copy of them is a second place where a
+        state bug has to be found and fixed."""
         c = tk.Canvas(self.chat, bg=T["bg"], highlightthickness=0, cursor="hand2", takefocus=0)
         c._ustate = "idle"                              # idle | working | done | error
         st = {"f": None, "w": 0, "h": 0, "rad": 0}      # current-zoom font + box, set by render()
-        labels = {"idle": f"⬆  Update CLI to v{latest}",
-                  "working": "Updating…  (≈1 min)",
-                  "done": "✓  Updated — click to restart",
-                  "error": "⚠  Update failed — click to retry"}
 
         def draw(hover=False):
             c.delete("all")
@@ -3585,15 +3590,14 @@ class Overlay:
         def on_click(_e):
             if c._ustate in ("idle", "error"):          # first click, or retry after a failure
                 set_state("working")
-                self._cli_update_btn_ref = c
-                def work():
+                setattr(self, btn_attr, c)
+                def run():
                     try:
-                        from cliupdate import run_update
-                        ok, msg = run_update()
+                        ok, msg = work()
                     except Exception as e:
                         ok, msg = False, type(e).__name__
-                    self.ui_q.put(("cli_update_result", (bool(ok), str(msg))))
-                threading.Thread(target=work, name="cli-update", daemon=True).start()
+                    self.ui_q.put((result_kind, (bool(ok), str(msg))))
+                threading.Thread(target=run, name=thread_name, daemon=True).start()
             elif c._ustate == "done":                   # after a successful update → restart now
                 self._restart_overlay()
             return "break"                              # working → inert
@@ -3606,6 +3610,20 @@ class Overlay:
         c.bind("<MouseWheel>", self._fwd_wheel)          # embedded widget must not swallow scroll
         self._register_zoomable(c, render)
         return c
+
+    def _cli_update_btn(self, latest):
+        """The 'your CLI is behind' button: runs `npm install -g @anthropic-ai/claude-code@latest`
+        (cliupdate.run_update) off the UI thread, then offers a restart so the newest models load.
+        Imported inside the worker so a broken/absent cliupdate can't cost us the button."""
+        def work():
+            from cliupdate import run_update
+            return run_update()
+        return self._one_click_update_btn(
+            {"idle": f"⬆  Update CLI to v{latest}",
+             "working": "Updating…  (≈1 min)",
+             "done": "✓  Updated — click to restart",
+             "error": "⚠  Update failed — click to retry"},
+            work, "cli-update", "_cli_update_btn_ref", "cli_update_result")
 
     def _show_cli_update_result(self, payload):
         """Restyle the Update button to its final state and print a follow-up line: success →
@@ -3626,6 +3644,76 @@ class Overlay:
         else:
             self.add_err(f"CLI update didn't complete — {msg}. You can also update from a terminal: "
                          " npm install -g @anthropic-ai/claude-code@latest")
+
+    # ── "a newer overlay exists" notice + one-click update (runs update.cmd) ────────────
+
+    def _show_overlay_update_notice(self, latest):
+        """Render the 'a newer overlay is out' notice. On a git clone we can update in place, so
+        the notice carries a one-click button that runs update.cmd; a ZIP install has nothing to
+        pull, so it gets the manual instructions instead of a button that can only refuse.
+        Shown at most once per session — the check runs once at startup, but a re-render should
+        not stack a second button whose result would restyle only the newest one."""
+        if getattr(self, "_ov_update_shown", False):
+            return
+        self._ov_update_shown = True
+        head = f"🔔 Update available: v{latest} (you have v{__version__}). "
+        if not can_self_update():
+            self.add_sys(head + "Close the overlay and run update.cmd (or: git pull) to upgrade.")
+            return
+        self.add_sys(head + "Update in one click — a console window opens and shows the pull, "
+                            "the packages and the check that the new code still starts. You "
+                            "don't have to close the overlay first:")
+        self.chat.insert("end", "\n")
+        self.chat.window_create("end", window=self._ov_update_btn(latest),
+                                padx=self.px(16), pady=self.px(2))
+        self.chat.insert("end", "\n")
+        self._scroll_follow()
+        self._prune_chat()
+
+    def _ov_update_btn(self, latest):
+        """The 'update the overlay itself' button. Runs update.cmd in its own console and waits
+        for it (win32utils.run_overlay_update), then restarts — this process keeps running the
+        modules it imported at launch, so nothing pulled takes effect until it does. The 'done'
+        label reports that restart rather than asking for it; the click is still wired to
+        _restart_overlay so the button remains the way out if the automatic one can't start."""
+        def work():
+            return run_overlay_update()      # looked up at click time, so it stays patchable
+        return self._one_click_update_btn(
+            {"idle": f"⬆  Update overlay to v{latest}",
+             "working": "Updating…  (in the console window)",
+             "done": "✓  Updated — restarting…",
+             "error": "⚠  Update failed — click to retry"},
+            work, "overlay-update", "_ov_update_btn_ref", "ov_update_result")
+
+    def _show_overlay_update_result(self, payload):
+        """Restyle the Update-overlay button and print the follow-up: success → say the restart
+        is happening and do it; failure → the reason plus the manual route, since the console
+        that explained it may already be closed.
+
+        The restart is automatic because a successful update leaves the app in a state nobody
+        wants to be left in: the new code is on disk, this window is still the old one, and the
+        only thing standing between them is a click that carries no decision — declining it just
+        means running code you already replaced. _restart_overlay hands off to a detached fresh
+        instance and only quits this one once that started, so a relaunch that fails leaves the
+        window and an error rather than nothing at all."""
+        try:
+            ok, msg = payload
+        except Exception:
+            ok, msg = False, str(payload)
+        c = getattr(self, "_ov_update_btn_ref", None)
+        if c is not None:
+            try:
+                c._set_ustate("done" if ok else "error")
+            except Exception:
+                pass
+        if ok:
+            self.add_sys("✅ Overlay updated. The new code is on disk, but this window is still "
+                         "running the old one — restarting now. The fresh window offers to "
+                         "resume this conversation.")
+            self._restart_overlay()
+        else:
+            self.add_err(f"Overlay update didn't complete — {msg}. You can also update it by "
+                         "hand: double-click update.cmd in the app folder.")
 
     def _restart_overlay(self):
         """Relaunch a fresh overlay instance, then close this one — the 'click to restart' action
@@ -5235,9 +5323,10 @@ class Overlay:
             self.add_sys(str(payload))
         elif kind == "update":
             self._update_available = str(payload)
-            self.add_sys(f"🔔 Update available: v{payload} (you have v{__version__}). "
-                         "Close the overlay and run update.cmd (or: git pull) to upgrade.")
+            self._show_overlay_update_notice(str(payload))
             self._refresh_statusline()
+        elif kind == "ov_update_result":
+            self._show_overlay_update_result(payload)
         elif kind == "cli_update":
             self._show_cli_update_notice(payload)
         elif kind == "cli_update_result":

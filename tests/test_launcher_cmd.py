@@ -350,6 +350,31 @@ def test_update_can_fall_back_to_pythonw_itself():
         "update.cmd derives the sibling python.exe but has no fallback to pythonw")
 
 
+def test_update_skips_only_its_success_pause_when_the_app_started_it():
+    """The overlay's one-click Update button runs update.cmd and WAITS on the process, then
+    restarts itself. update.cmd's success exit ended in `pause`, so that wait lasted until
+    somebody pressed a key in a console the user had not been told they owned -- the button
+    sat on "Updating..." and a finished update read as a hung one.
+
+    win32utils.run_overlay_update sets OV_UPDATE_AUTO for exactly that hand-off. What has to
+    stay true: that flag skips the SUCCESS pause and nothing else. Every failure path still
+    pauses, because the console is where the fix is written and a window that closes itself
+    takes the fix with it."""
+    body = [l.strip() for l in read("update.cmd").splitlines()
+            if not l.lstrip().startswith("rem ")]
+    guard = next((i for i, l in enumerate(body) if l == "if defined OV_UPDATE_AUTO ("), None)
+    assert guard is not None, (
+        "update.cmd no longer skips its success pause for an app-driven update -- the "
+        "Update button would hang on a keypress nobody knows to make")
+    block = body[guard:guard + 6]
+    assert "exit /b 0" in block, "the OV_UPDATE_AUTO branch must exit, not fall into `pause`"
+    # every OTHER pause is a failure path and must survive
+    paused = [i for i, l in enumerate(body) if l == "pause" or l.startswith("pause &")]
+    assert len(paused) >= 5, "update.cmd lost failure pauses; its errors would flash and vanish"
+    assert all(i < guard for i in paused[:-1]), (
+        "a failure pause moved after the OV_UPDATE_AUTO exit, where it can never be reached")
+
+
 def test_no_shipped_notice_hides_a_bare_bang():
     """These scripts run with delayed expansion on, where a lone `!` in an `echo` is EATEN:
     `echo [!] x` prints `[] x`, and `^!` does not rescue it in this position either

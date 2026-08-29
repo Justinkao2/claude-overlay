@@ -7,12 +7,15 @@ import ctypes
 import ctypes.wintypes as wt
 import json
 import os
+import shutil
 import subprocess
 import sys
 
 from config import TASKBAR_BUTTON, APP_ID, APP_ICON
 
 _CREATE_NO_WINDOW = 0x08000000 if sys.platform == "win32" else 0
+_CREATE_NEW_CONSOLE = 0x00000010 if sys.platform == "win32" else 0
+_REPO_DIR = os.path.dirname(os.path.abspath(__file__))   # this file lives in the app folder
 
 def set_dpi_awareness():
     """Make the process DPI-aware so 1 Tk pixel == 1 physical pixel (crisp, no
@@ -297,6 +300,68 @@ def relaunch_overlay(script_path):
     p = subprocess.Popen([exe, script_path],
                          cwd=os.path.dirname(script_path) or None, creationflags=flags)
     return p.pid
+
+
+def can_self_update(repo=None):
+    """True when update.cmd could actually update THIS install in place: the app folder is a git
+    clone and git is on PATH. A ZIP download has nothing to pull -- update.cmd would only print
+    the "re-download the ZIP" instructions -- so the UI asks this BEFORE offering an update
+    button, rather than handing the user one whose whole job is to open a console and say no.
+    Never raises; a False here just means the user is told to update the manual way."""
+    try:
+        repo = repo or _REPO_DIR
+        return (os.path.exists(os.path.join(repo, "update.cmd"))
+                and os.path.exists(os.path.join(repo, ".git"))    # a worktree's .git is a FILE
+                and shutil.which("git") is not None)
+    except Exception:
+        return False
+
+
+def run_overlay_update(repo=None):
+    """Run the app folder's update.cmd IN ITS OWN CONSOLE WINDOW and wait for it. Returns
+    (ok, message); ok only for exit code 0. Never raises. Call this off the UI thread.
+
+    WHY A VISIBLE CONSOLE, not a captured silent run. update.cmd is the one sanctioned updater
+    (pull -> packages -> a preflight that proves the new code still loads), and every failure
+    path inside it ends in `pause` with the fix on screen -- no git, not a clone, a pull that
+    conflicts with local edits, no Python, pip blocked by a proxy. Capturing that output would
+    leave us either re-stating those instructions here (the exact drift that once split
+    requirements.txt from a hand-written package list) or reporting "update failed" with nothing
+    the user can act on. So the console IS the progress and error UI; we watch only the exit
+    code, which update.cmd propagates through both of its re-exec hops.
+
+    WHY OV_UPDATE_AUTO. update.cmd's success exit used to end in `pause`, so this wait() only
+    returned once somebody pressed a key in the console -- meanwhile the caller's button sat on
+    "Updating..." and an update that had already worked looked hung. The env var tells update.cmd
+    it was started by the app rather than double-clicked, and it skips THAT pause only. Its
+    failure paths still pause on purpose: the console is the error UI, and a window that closes
+    itself takes the fix with it.
+
+    WHY STILL NO TIMEOUT. A failing update legitimately waits at a `pause` for as long as the
+    user takes to read it, and a slow pip on a slow link can take minutes; any timeout we picked
+    would eventually report a finished update as a failure.
+
+    The overlay does NOT need to be closed first: Python already holds the current modules in
+    memory, so pulling underneath a running instance is safe -- the new code simply doesn't take
+    effect until a restart, which is what the caller offers once this returns ok."""
+    repo = repo or _REPO_DIR
+    script = os.path.join(repo, "update.cmd")
+    if not os.path.exists(script):
+        return (False, "update.cmd is missing from the app folder")
+    try:
+        # cmd /c, because CreateProcess cannot exec a .cmd shim directly. CREATE_NEW_CONSOLE
+        # because under pythonw there is no console to inherit -- without one the updater's
+        # output, and every `pause` prompt in it, would go nowhere.
+        env = dict(os.environ)
+        env["OV_UPDATE_AUTO"] = "1"          # see WHY OV_UPDATE_AUTO above
+        p = subprocess.Popen(["cmd", "/c", script], cwd=repo, env=env,
+                             creationflags=_CREATE_NEW_CONSOLE)
+        rc = p.wait()
+    except Exception as e:
+        return (False, f"couldn't run update.cmd ({type(e).__name__})")
+    if rc == 0:
+        return (True, "")
+    return (False, f"update.cmd stopped with exit code {rc} - its window says why")
 
 
 # Win32 region calls — set argtypes so 64-bit handles aren't truncated.

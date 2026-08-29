@@ -220,7 +220,22 @@ The overlay shows its version in the bottom status line (e.g. `v1.7.2`) and chec
 GitHub for a newer release on startup — when one exists you'll see a 🔔 note and a `⬆`
 next to the version. To upgrade:
 
-### 🖱️ One double-click — `update.cmd` (recommended)
+### 🖱️ One click — the button in the chat (recommended)
+
+On a `git clone` install, the 🔔 notice comes with an **⬆ Update overlay to vX.Y.Z**
+button. Clicking it runs `update.cmd` for you in a console window, so you can watch the
+pull, the package refresh and the check that the new code still starts. You don't have to
+close the overlay first, and that's the last thing you have to do: when the update lands,
+the console closes itself and **the overlay restarts into the new code on its own** — the
+fresh window offers to resume the conversation you were in.
+
+If the update *fails*, nothing restarts. The console stays open on the error (that's where
+the fix is written), and the button turns into **⚠ Update failed — click to retry**.
+
+(Installed from the **ZIP**? There's no clone to pull into, so the notice gives you the
+instructions below instead of a button.)
+
+### 🖱️ One double-click — `update.cmd`
 
 Double-click **`update.cmd`**. It runs `git pull`, refreshes the Python packages, and — if you
 already have a Desktop shortcut — refreshes its icon to match the current version.
