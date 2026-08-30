@@ -63,10 +63,10 @@ def store(tmp_path):
 
 def test_project_slug_matches_the_cli_layout():
     """Every non-alphanumeric character becomes '-', so a drive-letter path gains a double
-    dash where ':' and '\\' meet. This is checked against a real folder name."""
+    dash where ':' and '\\' meet. This is checked against a full Windows project path."""
     assert sessions.project_slug(r"C:\Users\user") == "C--Users-user"
-    assert (sessions.project_slug(r"C:\Users\user\Desktop\kckaoeplayground\claude-overlay")
-            == "C--Users-user-Desktop-kckaoeplayground-claude-overlay")
+    assert (sessions.project_slug(r"C:\Users\user\Desktop\projects\claude-overlay")
+            == "C--Users-user-Desktop-projects-claude-overlay")
 
 
 def test_project_slug_preserves_case():
